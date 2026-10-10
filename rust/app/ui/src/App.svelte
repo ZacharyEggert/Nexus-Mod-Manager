@@ -51,13 +51,15 @@
     reload();
   }
 
+  const count = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`;
+
   /** Rebuild deploy records from the game folder (`adopt`: re-adding stray mods first); reports what it left for review. */
   async function repair(adopt = false) {
     if (view.kind !== 'game') return;
     const r = await runTask(adopt ? 'Re-adding mods' : 'Scanning game and repairing', (adopt ? api.adopt : api.repair)(view.mode)).catch(() => null);
     const notes = [
-      r?.orphaned_backups.length && `${r.orphaned_backups.length} outdated backups moved to OrphanedBackup in the mods folder`,
-      r?.untracked.length && `${r.untracked.length} files match a mod but weren’t recorded, so were left in place: ${r.untracked.join(', ')}`,
+      r?.orphaned_backups.length && `${count(r.orphaned_backups.length, 'outdated backup')} moved to OrphanedBackup in the mods folder`,
+      r?.untracked.length && `${count(r.untracked.length, 'file')} matching a mod but not recorded, left in place: ${r.untracked.join(', ')}`,
     ].filter(Boolean);
     if (notes.length) status(`Done. ${notes.join('. ')}.`);
     reload();

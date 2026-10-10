@@ -114,8 +114,8 @@ pub enum LinkMode {
 /// What `repair` couldn't settle on its own; left in place for the user to review.
 #[derive(Debug, Default, Clone, Serialize, PartialEq)]
 pub struct RepairReport {
-    /// Stale backups set aside under `OrphanedBackup/` (relative to the mods folder): the game
-    /// replaced the file after the mod displaced it.
+    /// Stale backups this run set aside under `OrphanedBackup/` (relative to the mods folder):
+    /// the game replaced the file after the mod displaced it.
     pub orphaned_backups: Vec<String>,
     /// Game paths holding an unrecorded copy of a mod's file. Could be a mod copy whose record
     /// was lost, or a game file with the same bytes; kept since deleting the latter loses it.
@@ -944,8 +944,10 @@ impl Manager {
             add(key(&path, game_root), Deployed { path, mod_id: String::new(), game_root, src: None }, false);
         }
         tracing::info!(paths = cands.len(), "scanning game against mods");
+        let aside = |m: &Self| files_under(&m.mods_dir.join("OrphanedBackup")).iter().map(|f| rel(f, &m.mods_dir)).collect::<Vec<_>>();
+        let before = aside(self);
         self.reconcile(&cands)?;
-        let orphaned_backups = files_under(&self.mods_dir.join("OrphanedBackup")).iter().map(|f| rel(f, &self.mods_dir)).collect();
+        let orphaned_backups = aside(self).into_iter().filter(|f| !before.contains(f)).collect();
         let untracked = cands
             .iter()
             .filter(|(k, (_, live))| live.is_empty() && !self.state.deployed.contains_key(*k))
@@ -1287,6 +1289,7 @@ mod tests {
         let report = m.repair().unwrap();
         assert_eq!(report.orphaned_backups, ["OrphanedBackup/Backup/textures/patched.dds"]);
         assert_eq!(report.untracked, ["Data/textures/same.dds"]);
+        assert!(m.repair().unwrap().orphaned_backups.is_empty(), "only this run's are reported");
         assert!(m.in_sync());
         assert_eq!(m.state.deployed, want);
         let read = |p: &Path| fs::read_to_string(p).unwrap();
