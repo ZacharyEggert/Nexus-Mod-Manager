@@ -7,6 +7,7 @@
 //! the game root instead of the install root (script extenders), `.staging/` scratch, `state.json`, and `deploy.journal` while a deploy
 //! is in flight (reconciled against the filesystem on the next `open` if we died mid-deploy).
 
+use crate::adjust::{self, Dest};
 use crate::fomod::{self, ModuleConfig, Selection};
 use crate::game::{has_ext, GameDef};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,9 @@ pub struct Deployed {
     /// `path` is relative to the game root, not the install root.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub game_root: bool,
+    /// The mod's stored path when it differs from `path` (load-order-numbered NMS folders).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src: Option<String>,
 }
 
 /// `deployed` key. Game-root paths get a leading `/` so `x.dll` in the root and in Data don't collide.
@@ -273,7 +277,8 @@ impl Manager {
         } else {
             (self.install_root(), self.mods_dir.join("Backup"), self.virtual_dir(&d.mod_id))
         };
-        Place { target: root.join(&d.path), saved: backup.join(&d.path), src: store.join(&d.path), root, backup }
+        let src = store.join(d.src.as_deref().unwrap_or(&d.path));
+        Place { target: root.join(&d.path), saved: backup.join(&d.path), src, root, backup }
     }
 
     /// fileDependency state for FOMod conditions.
@@ -302,18 +307,34 @@ impl Manager {
 
     /// Install a staged archive. `sel` is required when the archive is a FOMod.
     pub fn install(&mut self, staged: Staged, sel: Option<&Selection>) -> R<()> {
+        let name = match (&staged.fomod, sel) {
+            (Some((_, cfg)), Some(_)) if !cfg.name.is_empty() => cfg.name.clone(),
+            _ => staged.id.clone(),
+        };
+        let profile = self.game.mod_install.path_adjustment_profile;
         // key(dest) -> (source, dest, game_root); later inserts win, matching FOMod priority order.
         let mut map: BTreeMap<String, (PathBuf, String, bool)> = BTreeMap::new();
-        let mut put = |src: PathBuf, dest: String, game_root: bool| {
+        let mut profile_root = false;
+        let mut insert = |src: PathBuf, dest: String, game_root: bool| {
             if !IGNORED.iter().any(|i| dest.rsplit('/').next().unwrap_or("").eq_ignore_ascii_case(i)) {
                 map.insert(key(&dest, game_root), (src, dest, game_root));
             }
         };
-        let name;
+        // Install-root paths go through the game's path adjustment profile first.
+        let mut put = |src: PathBuf, dest: String, game_root: bool| match game_root {
+            true => insert(src, dest, true),
+            false => match adjust::adjust(profile, &dest, &name) {
+                Some(Dest::Install(d)) => insert(src, d, false),
+                Some(Dest::GameRoot(d)) => {
+                    profile_root = true;
+                    insert(src, d, true)
+                }
+                None => {}
+            },
+        };
         let mut game_root = false;
         match (&staged.fomod, sel) {
             (Some((base, cfg)), Some(sel)) => {
-                name = if cfg.name.is_empty() { staged.id.clone() } else { cfg.name.clone() };
                 // Case-insensitive index of the archive: FOMod paths rarely match on-disk case.
                 let index: HashMap<String, PathBuf> = walkdir::WalkDir::new(base)
                     .into_iter()
@@ -337,7 +358,6 @@ impl Manager {
             }
             (Some(_), None) => return Err("FOMod selection required".into()),
             (None, _) => {
-                name = staged.id.clone();
                 let prefix = find_prefix(&staged.dir, &self.game);
                 for file in files_under(&prefix) {
                     let r = rel(&file, &prefix);
@@ -355,7 +375,7 @@ impl Manager {
 
         let (mut files, mut root_files) = (vec![], vec![]);
         for (src, dest, game_root) in map.into_values() {
-            let to = self.place(&Deployed { path: dest.clone(), mod_id: staged.id.clone(), game_root }).src;
+            let to = self.place(&Deployed { path: dest.clone(), mod_id: staged.id.clone(), game_root, src: None }).src;
             fs::create_dir_all(to.parent().unwrap()).map_err(err)?;
             fs::copy(&src, &to).map_err(err)?;
             if game_root { &mut root_files } else { &mut files }.push(dest);
@@ -367,7 +387,7 @@ impl Manager {
             archive: staged.archive.to_string_lossy().into_owned(),
             files,
             root_files,
-            game_root,
+            game_root: game_root || profile_root,
             active: true,
         });
         self.deploy()
@@ -425,13 +445,24 @@ impl Manager {
         self.save()
     }
 
+    /// Every (key, link) active mods want, in load order; later entries win a key.
+    fn wanted(&self) -> Vec<(String, Deployed)> {
+        let mut out = vec![];
+        for (i, m) in self.state.mods.iter().enumerate().filter(|(_, m)| m.active) {
+            for (f, game_root) in m.deployable() {
+                let path = adjust::resolve(f, i);
+                let src = (path != *f).then(|| f.clone());
+                out.push((key(&path, game_root), Deployed { path, mod_id: m.id.clone(), game_root, src }));
+            }
+        }
+        out
+    }
+
     /// Which mods each mod overrides / is overridden by, for the UI.
     pub fn conflicts(&self) -> BTreeMap<String, Vec<String>> {
-        let mut owners: BTreeMap<String, Vec<&str>> = BTreeMap::new();
-        for m in self.state.mods.iter().filter(|m| m.active) {
-            for (f, game_root) in m.deployable() {
-                owners.entry(key(f, game_root)).or_default().push(&m.id);
-            }
+        let mut owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (k, d) in self.wanted() {
+            owners.entry(k).or_default().push(d.mod_id);
         }
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for ids in owners.values().filter(|v| v.len() > 1) {
@@ -454,12 +485,7 @@ impl Manager {
     }
 
     pub fn deploy(&mut self) -> R<()> {
-        let mut desired: BTreeMap<String, Deployed> = BTreeMap::new();
-        for m in self.state.mods.iter().filter(|m| m.active) {
-            for (f, game_root) in m.deployable() {
-                desired.insert(key(f, game_root), Deployed { path: f.clone(), mod_id: m.id.clone(), game_root });
-            }
-        }
+        let desired: BTreeMap<String, Deployed> = self.wanted().into_iter().collect();
         let deployed = &self.state.deployed;
         let journal: Journal = deployed
             .keys()
@@ -473,6 +499,10 @@ impl Manager {
             write_durable(&self.journal_path(), &serde_json::to_vec(&journal).map_err(err)?)?;
         }
         let result = self.apply(&journal);
+        if !journal.is_empty() && self.game.mod_install.path_adjustment_profile == adjust::Profile::NoMansSky {
+            // NMS caches its mod list here; stale entries hide changed mods. Best effort, as in C#.
+            let _ = fs::remove_file(self.game_path.join("Binaries/SETTINGS/GCMODSETTINGS.MXML"));
+        }
         if result.is_err() {
             self.reconcile(&journal)?;
         }
@@ -768,6 +798,71 @@ mod tests {
         assert_eq!(fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(), "vanilla");
         assert!(!m.mods_dir.join("GameRootInstall/skse64").exists());
         assert!(!m.mods_dir.join("GameRootBackup/steam_api64.dll").exists());
+    }
+
+    #[test]
+    fn path_adjustment_profile_applies_on_install() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(&game_path).unwrap();
+        let mut m = Manager::open(crate::game::find("stardewvalley").unwrap(), game_path.clone(), t.path().join("mods")).unwrap();
+        let z = t.path().join("Foo.zip");
+        zip(&z, &[("Foo/manifest.json", "{}"), ("Foo/Foo.dll", "d")]);
+        let s = m.stage(&z).unwrap();
+        m.install(s, None).unwrap();
+        assert_eq!(fs::read_to_string(game_path.join("Mods/Foo/manifest.json")).unwrap(), "{}");
+        assert!(game_path.join("Mods/Foo/Foo.dll").exists());
+        m.remove("Foo").unwrap();
+        assert!(!game_path.join("Mods").exists());
+
+        // OBSE-style root files from a profile deploy outside Data and default the toggle on.
+        let game_path = t.path().join("obr");
+        fs::create_dir_all(game_path.join("OblivionRemastered/Content/Dev/ObvData/Data")).unwrap();
+        let mut game = crate::game::find("OblivionRemastered").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods-obr")).unwrap();
+        let z = t.path().join("obse.zip");
+        zip(&z, &[("OBSE/Plugins/x.dll", "x"), ("A.esp", "p")]);
+        let s = m.stage(&z).unwrap();
+        m.install(s, None).unwrap();
+        assert!(m.state.mods[0].game_root);
+        assert!(game_path.join("OblivionRemastered/Binaries/Win64/OBSE/Plugins/x.dll").exists());
+        assert!(game_path.join("OblivionRemastered/Content/Dev/ObvData/Data/A.esp").exists());
+    }
+
+    #[test]
+    fn nms_mod_folders_follow_load_order() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("nms");
+        let settings = game_path.join("Binaries/SETTINGS/GCMODSETTINGS.MXML");
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        fs::write(&settings, "cache").unwrap();
+        let mut m = Manager::open(crate::game::find("NoMansSky").unwrap(), game_path.clone(), t.path().join("mods")).unwrap();
+        for name in ["Alpha", "Beta"] {
+            let z = t.path().join(format!("{name}.zip"));
+            zip(&z, &[(&format!("{name}/MODELS/a.mbin"), name)]);
+            let s = m.stage(&z).unwrap();
+            m.install(s, None).unwrap();
+        }
+        let mods = game_path.join("GAMEDATA/MODS");
+        assert_eq!(fs::read_to_string(mods.join("0000_Alpha/MODELS/a.mbin")).unwrap(), "Alpha");
+        assert!(mods.join("0001_Beta/MODELS/a.mbin").exists());
+        assert!(!settings.exists());
+        assert!(m.conflicts().is_empty());
+
+        m.reorder("Beta", -1).unwrap();
+        assert!(mods.join("0000_Beta/MODELS/a.mbin").exists());
+        assert_eq!(fs::read_to_string(mods.join("0001_Alpha/MODELS/a.mbin")).unwrap(), "Alpha");
+        assert!(!mods.join("0000_Alpha").exists() && !mods.join("0001_Beta").exists());
+
+        // Disabling a mod doesn't renumber the others.
+        m.set_active("Beta", false).unwrap();
+        assert!(mods.join("0001_Alpha/MODELS/a.mbin").exists());
+        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        assert_eq!(reopened.state.deployed.len(), 1);
+        m.remove("Alpha").unwrap();
+        assert!(!mods.join("0001_Alpha").exists());
     }
 
     #[test]

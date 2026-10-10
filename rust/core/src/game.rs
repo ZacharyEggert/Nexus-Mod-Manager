@@ -81,6 +81,8 @@ pub struct ModInstallDef {
     #[serde(default)]
     pub real_file_required_extensions: Vec<String>,
     pub managed_installation_path: Option<String>,
+    #[serde(default)]
+    pub path_adjustment_profile: crate::adjust::Profile,
     /// Archive files beside the Data folder (script extender exe/dll) may deploy to the game root.
     #[serde(default)]
     pub supports_game_root_install: bool,

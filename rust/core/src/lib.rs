@@ -1,3 +1,4 @@
+pub mod adjust;
 pub mod archive;
 pub mod discover;
 pub mod fomod;
