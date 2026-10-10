@@ -55,3 +55,13 @@ table.downloads td { vertical-align:top; }
 table.downloads td.actions { white-space:nowrap; text-align:right; }
 button.link { border:0; background:none; color:var(--accent); padding:0 4px; cursor:pointer; font:inherit; text-decoration:underline; }
 button.badge { border:1px solid var(--warn); color:var(--warn); background:none; border-radius:10px; padding:1px 8px; margin-top:3px; cursor:pointer; font:inherit; font-size:12px; }
+.tabs { display:flex; gap:4px; margin-bottom:12px; }
+.tabs button { border:1px solid var(--line); background:var(--panel); color:var(--muted); border-radius:6px; padding:5px 14px; cursor:pointer; font:inherit; }
+.tabs button[aria-selected=true] { color:#fff; background:var(--accent); border-color:var(--accent); }
+.plugins { display:grid; grid-template-columns:1fr auto; gap:12px; align-items:start; }
+.plugins tr[draggable=true] { cursor:grab; }
+.plugins tr.sel td { background:var(--bg); }
+.plugins tr.drag { opacity:.4; }
+.plugins .details { width:260px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:13px; }
+.plugins .details h3 { margin:0 0 6px; font-size:14px; word-break:break-all; }
+.small { font-size:12px; }

@@ -140,6 +140,19 @@ pub struct RepairReport {
     pub untracked: Vec<String>,
 }
 
+/// A plugin as the plugin tab shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginRow {
+    #[serde(flatten)]
+    pub entry: plugins::Entry,
+    /// Pinned by the game (base masters, DLC): can't be moved.
+    pub locked_order: bool,
+    /// Always loaded: can't be deactivated.
+    pub locked_active: bool,
+    /// Installed mod that deployed it; None for game files and plugins added outside NMM.
+    pub owner: Option<String>,
+}
+
 /// Extracted archive waiting to be installed.
 #[derive(Debug, Clone)]
 pub struct Staged {
@@ -1310,6 +1323,88 @@ impl Manager {
         out
     }
 
+    // ---------- plugins ----------
+
+    fn plugin_rows(
+        &self,
+        policy: &plugins::Policy,
+        entries: Vec<plugins::Entry>,
+    ) -> Vec<PluginRow> {
+        entries
+            .into_iter()
+            .map(|e| PluginRow {
+                locked_order: policy.is_fixed(&e.name),
+                locked_active: policy.is_forced_active(&e.name),
+                owner: self
+                    .state
+                    .deployed
+                    .get(&key(&e.name, false))
+                    .and_then(|d| self.state.mods.iter().find(|m| m.id == d.mod_id))
+                    .map(|m| m.name.clone()),
+                entry: e,
+            })
+            .collect()
+    }
+
+    /// The game's plugins in load order; None when it doesn't use plugins.
+    pub fn plugins(&self) -> Option<Vec<PluginRow>> {
+        let policy = plugins::Policy::new(&self.game, &self.game_path)?;
+        let list = policy.read();
+        let headers = policy.headers(&list);
+        Some(self.plugin_rows(&policy, policy.check(&list, &headers)))
+    }
+
+    /// Set plugin order and active states (C# `TryApplyPluginState`). The ordering rules are
+    /// re-applied (critical plugins on top, masters above dependents); a change that adds an
+    /// error (activating a plugin whose master is off, deactivating a master in use, running
+    /// out of slots) is refused whole. Plugins left out of `wanted` keep their place at the end.
+    pub fn set_plugins(&self, wanted: &[plugins::Plugin]) -> R<Vec<PluginRow>> {
+        let policy = plugins::Policy::new(&self.game, &self.game_path)
+            .ok_or("this game doesn't use plugins")?;
+        let current = policy.read();
+        let headers = policy.headers(&current);
+        let errors = |entries: &[plugins::Entry]| -> Vec<String> {
+            entries
+                .iter()
+                .flat_map(|e| {
+                    e.diagnostics
+                        .iter()
+                        .filter(|d| d.error)
+                        .map(move |d| format!("{}: {}", e.name, d.message))
+                })
+                .collect()
+        };
+        let before = errors(&policy.check(&current, &headers));
+        let mut list: Vec<plugins::Plugin> = wanted
+            .iter()
+            .filter_map(|w| {
+                let c = current
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(&w.name))?;
+                Some(plugins::Plugin {
+                    name: c.name.clone(),
+                    active: w.active,
+                })
+            })
+            .collect();
+        for c in &current {
+            if !list.iter().any(|p| p.name == c.name) {
+                list.push(c.clone());
+            }
+        }
+        policy.correct(&mut list, &headers);
+        let entries = policy.check(&list, &headers);
+        let new: Vec<String> = errors(&entries)
+            .into_iter()
+            .filter(|e| !before.contains(e))
+            .collect();
+        if !new.is_empty() {
+            return Err(new.join("; ").into());
+        }
+        policy.write(&list)?;
+        Ok(self.plugin_rows(&policy, entries))
+    }
+
     /// Persist the plugin load order after a deploy. `added` are paths this deploy linked fresh:
     /// their plugins load last and start active (C# `IntegrateDeployedPlugins`); everything else
     /// keeps the order and state the game's files already hold.
@@ -1530,6 +1625,109 @@ mod tests {
             body.ends_with("*Lib.esp\r\nOrphan.esp\r\n*Dep.esp\r\n"),
             "{body}"
         );
+    }
+
+    #[test]
+    fn plugin_tab_reorders_toggles_and_refuses_breakage() {
+        use crate::plugins::{tests::tes4, Issue, Plugin};
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("Skyrim.esm"), tes4(1, &[], "")).unwrap();
+        fs::write(data.join("Lib.esm"), tes4(1, &[], "")).unwrap();
+        fs::write(data.join("Dep.esp"), tes4(0, &["Lib.esm"], "Needs Lib")).unwrap();
+        fs::write(data.join("Free.esp"), tes4(0, &[], "")).unwrap();
+        fs::write(data.join("Broken.esp"), tes4(0, &["Gone.esm"], "")).unwrap();
+        let txt = t.path().join("plugins.txt");
+        fs::write(&txt, "*Lib.esm\r\n*Dep.esp\r\n*Free.esp\r\n*Broken.esp\r\n").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let m = Manager::open(game, game_path, t.path().join("mods")).unwrap();
+
+        let rows = m.plugins().unwrap();
+        let view = |rows: &[PluginRow]| -> Vec<String> {
+            rows.iter()
+                .map(|r| format!("{}{}", if r.entry.active { "*" } else { "" }, r.entry.name))
+                .collect()
+        };
+        assert_eq!(
+            view(&rows),
+            [
+                "*Skyrim.esm",
+                "*Lib.esm",
+                "*Dep.esp",
+                "*Free.esp",
+                "*Broken.esp"
+            ]
+        );
+        assert!(rows[0].locked_order && rows[0].locked_active && !rows[1].locked_order);
+        assert_eq!(
+            rows[2].entry.header.description.as_deref(),
+            Some("Needs Lib")
+        );
+        assert_eq!(rows[4].entry.diagnostics[0].issue, Issue::MissingMaster);
+        let pl = |n: &str, active: bool| Plugin {
+            name: n.into(),
+            active,
+        };
+
+        // Dragging Skyrim.esm down or Dep above its master is corrected, not refused.
+        // Broken.esp's existing error doesn't block unrelated changes (turning Free off).
+        let rows = m
+            .set_plugins(&[
+                pl("dep.esp", true),
+                pl("Free.esp", false),
+                pl("Lib.esm", true),
+                pl("Skyrim.esm", true),
+                pl("Broken.esp", true),
+            ])
+            .unwrap();
+        assert_eq!(
+            view(&rows),
+            [
+                "*Skyrim.esm",
+                "*Lib.esm",
+                "*Dep.esp",
+                "Free.esp",
+                "*Broken.esp"
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(&txt).unwrap(),
+            "# This file is used by the game to keep track of your downloaded content.\r\n\
+             *Lib.esm\r\n*Dep.esp\r\nFree.esp\r\n*Broken.esp\r\n"
+        );
+
+        // Deactivating a master in use is refused; the files stay as they were.
+        let before = fs::read_to_string(&txt).unwrap();
+        let err = m
+            .set_plugins(&[pl("Lib.esm", false), pl("Dep.esp", true)])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "Dep.esp: Required master is inactive: Lib.esm");
+        assert_eq!(fs::read_to_string(&txt).unwrap(), before);
+        // ...together with its dependent it's fine. Skyrim.esm can't be turned off.
+        let rows = m
+            .set_plugins(&[
+                pl("Skyrim.esm", false),
+                pl("Lib.esm", false),
+                pl("Dep.esp", false),
+            ])
+            .unwrap();
+        assert_eq!(
+            view(&rows),
+            [
+                "*Skyrim.esm",
+                "Lib.esm",
+                "Dep.esp",
+                "Free.esp",
+                "*Broken.esp"
+            ]
+        );
+        // Activating a plugin whose master is off is refused.
+        assert!(m.set_plugins(&[pl("Dep.esp", true)]).is_err());
     }
 
     /// Cancel at the Nth progress step: extract leaves no staging junk; a cancelled install,

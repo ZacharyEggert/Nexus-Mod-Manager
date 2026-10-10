@@ -5,6 +5,7 @@
   import AppSettings from './AppSettings.svelte';
   import Downloads from './Downloads.svelte';
   import Library from './Library.svelte';
+  import Plugins from './Plugins.svelte';
   import Setup from './Setup.svelte';
   import Wizard from './Wizard.svelte';
 
@@ -20,6 +21,7 @@
   let profile = $state('');
   let profileName = $state('');
   let launchAnyway = false;
+  let tab = $state<'mods' | 'plugins'>('mods');
 
   async function loadGames() {
     games = await api.games();
@@ -197,7 +199,17 @@
       {#if view.setup}
         {#key cur.mode_id}<Setup game={cur} onsaved={() => select(cur.mode_id)} />{/key}
       {:else if lib}
-        <Library {lib} {op} {repair} />
+        {#if lib.uses_plugins}
+          <div class="tabs" role="tablist">
+            <button role="tab" aria-selected={tab === 'mods'} onclick={() => (tab = 'mods')}>Mods</button>
+            <button role="tab" aria-selected={tab === 'plugins'} onclick={() => (tab = 'plugins')}>Plugins</button>
+          </div>
+        {/if}
+        {#if lib.uses_plugins && tab === 'plugins'}
+          <Plugins mode={view.mode} />
+        {:else}
+          <Library {lib} {op} {repair} />
+        {/if}
       {/if}
     {/if}
   </div>

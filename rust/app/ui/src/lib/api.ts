@@ -68,6 +68,38 @@ export interface Library {
   categories: Record<string, string>;
   /** Unix seconds of the last Nexus update check. */
   nexus_checked: number | null;
+  /** The game has a plugin load order (Plugins tab). */
+  uses_plugins: boolean;
+}
+
+export interface Plugin {
+  name: string;
+  active: boolean;
+}
+
+export type PluginIssue = 'missingMaster' | 'inactiveMaster' | 'masterBelowDependent' | 'dependencyCycle' | 'unsupportedClass' | 'slotsExhausted';
+
+export interface PluginRow extends Plugin {
+  header: {
+    masters: string[];
+    master: boolean;
+    light: boolean;
+    medium: boolean;
+    blueprint: boolean;
+    description: string | null;
+    unreadable: boolean;
+  };
+  /** Slot class while active. */
+  class: 'full' | 'light' | 'medium' | null;
+  /** Index the game gives it (`0A`, `FE:001`); null while inactive or out of slots. */
+  index: string | null;
+  diagnostics: { issue: PluginIssue; error: boolean; message: string }[];
+  /** Pinned by the game: can't be moved. */
+  locked_order: boolean;
+  /** Always loaded: can't be deactivated. */
+  locked_active: boolean;
+  /** Installed mod that deployed it. */
+  owner: string | null;
 }
 
 export interface RepairReport {
@@ -199,6 +231,9 @@ export const games = () => invoke<GameInfo[]>('games');
 export const configure = (mode: string, gamePath: string, modsDir: string | null, launch: string | null) =>
   invoke<void>('configure', { mode, gamePath, modsDir, launch });
 export const library = (mode: string) => invoke<Library>('library', { mode });
+export const plugins = (mode: string) => invoke<PluginRow[]>('plugins', { mode });
+/** Refused with the reasons when the change would break the load order. */
+export const pluginsSet = (mode: string, plugins: Plugin[]) => invoke<PluginRow[]>('plugins_set', { mode, plugins });
 export const pickArchive = () => invoke<string | null>('pick_archive');
 export const pickFolder = () => invoke<string | null>('pick_folder');
 export const fomodEval = (token: string, sel: Selection) => invoke<Eval>('fomod_eval', { token, sel });

@@ -2,8 +2,9 @@
 
 use nmm_core::download::{self, Download, Downloads};
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
-use nmm_core::manager::{LinkMode, Manager, ModEntry, Staged};
+use nmm_core::manager::{LinkMode, Manager, ModEntry, PluginRow, Staged};
 use nmm_core::nexus::{self, sso, User};
+use nmm_core::plugins::Plugin;
 use nmm_core::{discover, game, IoContext, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -563,6 +564,8 @@ struct Library {
     categories: BTreeMap<u64, String>,
     /// Unix seconds of the last Nexus update check.
     nexus_checked: Option<u64>,
+    /// The game has a plugin load order (Plugins tab).
+    uses_plugins: bool,
 }
 
 #[tauri::command]
@@ -578,8 +581,27 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
         profiles: m.state.profiles.keys().cloned().collect(),
         categories: categories(&m).into_iter().map(|c| (c.id, c.name)).collect(),
         nexus_checked: m.state.nexus_checked,
+        uses_plugins: nmm_core::plugins::Policy::new(&m.game, &m.game_path).is_some(),
         mods: m.state.mods,
     })
+}
+
+// ---------- plugins ----------
+
+#[tauri::command]
+async fn plugins(app: AppHandle, mode: String) -> R<Vec<PluginRow>> {
+    blocking(move || Ok(read(&app, &mode)?.plugins().unwrap_or_default())).await
+}
+
+/// Set plugin order + active states; refused (with the reasons) when it would break the load order.
+#[tauri::command]
+async fn plugins_set(app: AppHandle, mode: String, plugins: Vec<Plugin>) -> R<Vec<PluginRow>> {
+    blocking(move || {
+        let lock = app.state::<App>().lock(&mode);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        manager(&app, &mode)?.set_plugins(&plugins)
+    })
+    .await
 }
 
 // ---------- Nexus metadata, categories, update checks ----------
@@ -1135,6 +1157,8 @@ fn main() {
             games,
             configure,
             library,
+            plugins,
+            plugins_set,
             pick_archive,
             pick_folder,
             stage,
