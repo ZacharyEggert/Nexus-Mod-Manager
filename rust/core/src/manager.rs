@@ -1318,16 +1318,46 @@ impl Manager {
             return Ok(());
         };
         let mut list = policy.read();
+        let mut fresh = vec![];
         for m in &self.state.mods {
             for f in m.files.iter().filter(|f| added.contains(&key(f, false))) {
                 if let Some(i) = list.iter().position(|p| p.name.eq_ignore_ascii_case(f)) {
-                    let mut p = list.remove(i);
-                    p.active = true;
+                    fresh.push(list[i].name.clone());
+                    let p = list.remove(i);
                     list.push(p);
                 }
             }
         }
-        policy.correct(&mut list, plugins::ext_master);
+        let headers = policy.headers(&list);
+        policy.correct(&mut list, &headers);
+        // Activate each fresh plugin unless that gives it an error (missing master, no free slot);
+        // repeat so a fresh master activated later lets its dependents in.
+        let mut pending: Vec<String> = list
+            .iter()
+            .filter(|p| fresh.contains(&p.name) && !p.active)
+            .map(|p| p.name.clone())
+            .collect();
+        loop {
+            let before = pending.len();
+            pending.retain(|name| {
+                let i = list.iter().position(|p| &p.name == name).unwrap();
+                list[i].active = true;
+                if policy.check(&list, &headers)[i].has_errors() {
+                    list[i].active = false;
+                    return true;
+                }
+                false
+            });
+            if pending.len() == before {
+                break;
+            }
+        }
+        if !pending.is_empty() {
+            tracing::warn!(
+                ?pending,
+                "deployed plugins left inactive: activating them would break the load order"
+            );
+        }
         policy.write(&list)
     }
 }
@@ -1460,6 +1490,45 @@ mod tests {
         assert_eq!(
             body(),
             format!("{header}*B.esm\r\nA.esp\r\n*C.esp\r\n*B.esp\r\n")
+        );
+    }
+
+    #[test]
+    fn deployed_plugins_missing_masters_stay_inactive() {
+        use crate::plugins::tests::tes4;
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        let txt = t.path().join("plugins.txt");
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let mut m = Manager::open(game, game_path, t.path().join("mods")).unwrap();
+        let mut add = |name: &str, files: &[(&str, Vec<u8>)]| {
+            let a = t.path().join(format!("{name}.zip"));
+            let mut z = zip::ZipWriter::new(fs::File::create(&a).unwrap());
+            for (n, body) in files {
+                z.start_file(*n, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                z.write_all(body).unwrap();
+            }
+            z.finish().unwrap();
+            let s = m.stage(&a).unwrap();
+            m.install(s, None).unwrap();
+        };
+        add("Orphan", &[("Orphan.esp", tes4(0, &["Nowhere.esm"], ""))]);
+        // Archive order puts the dependent first; its master still loads above it and both activate.
+        add(
+            "Pair",
+            &[
+                ("Dep.esp", tes4(0, &["Lib.esp"], "")),
+                ("Lib.esp", tes4(1, &[], "")),
+            ],
+        );
+        let body = fs::read_to_string(&txt).unwrap();
+        assert!(
+            body.ends_with("*Lib.esp\r\nOrphan.esp\r\n*Dep.esp\r\n"),
+            "{body}"
         );
     }
 

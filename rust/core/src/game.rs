@@ -119,6 +119,24 @@ pub struct PluginPolicy {
     pub fixed_order_plugins: Vec<String>,
     #[serde(default)]
     pub forced_active_plugins: Vec<String>,
+    pub master_plugins_must_load_before_non_masters: Option<bool>,
+    pub validate_dependencies: Option<bool>,
+    #[serde(default)]
+    pub address_spaces: Vec<AddressSpaceDef>,
+    #[serde(default)]
+    pub blueprint_plugins: Vec<String>,
+    #[serde(default)]
+    pub blueprint_plugin_prefixes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddressSpaceDef {
+    /// `Full`, `Light`, `Medium` or `Small` (Starfield's name for light).
+    pub address_class: String,
+    pub first_index: usize,
+    pub max_count: usize,
+    pub display_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
