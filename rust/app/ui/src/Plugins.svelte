@@ -29,6 +29,14 @@
     preview = null;
   }
 
+  async function importUserlist() {
+    try {
+      if (await api.lootImportUserlist(mode)) status('LOOT userlist imported; used from the next sort');
+    } catch (e) {
+      status(`Not imported: ${e}`, true);
+    }
+  }
+
   async function exportOrder() {
     try {
       if (await api.pluginsExport(mode)) status('Load order exported');
@@ -174,7 +182,8 @@
   <input type="text" placeholder="Filter" aria-label="Filter plugins" size="18" bind:value={filter} />
   <button class="btn" onclick={() => setAll(true)}>Enable all</button>
   <button class="btn" onclick={() => setAll(false)}>Disable all</button>
-  {#if loot}<button class="btn" onclick={sortLoot}>Sort with LOOT</button>{/if}
+  {#if loot}<button class="btn" onclick={sortLoot}>Sort with LOOT</button>
+    <button class="btn" onclick={importUserlist}>LOOT userlist…</button>{/if}
   <button class="btn" onclick={exportOrder}>Export…</button>
   <button class="btn" onclick={importOrder}>Import…</button>
 </p>

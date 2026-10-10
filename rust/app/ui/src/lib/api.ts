@@ -255,6 +255,8 @@ export interface ImportReport {
 }
 /** Apply a load order file the user picks; null when cancelled. */
 export const pluginsImport = (mode: string) => invoke<ImportReport | null>('plugins_import', { mode });
+/** Replace the game's LOOT userlist with a file the user picks; false when cancelled. */
+export const lootImportUserlist = (mode: string) => invoke<boolean>('loot_import_userlist', { mode });
 export const pickArchive = () => invoke<string | null>('pick_archive');
 export const pickFolder = () => invoke<string | null>('pick_folder');
 export const fomodEval = (token: string, sel: Selection) => invoke<Eval>('fomod_eval', { token, sel });

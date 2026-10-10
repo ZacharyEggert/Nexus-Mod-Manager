@@ -657,6 +657,26 @@ async fn plugins_import(app: AppHandle, mode: String) -> R<Option<ImportReport>>
     .await
 }
 
+/// Replace the game's LOOT userlist with one the user picks; false when they cancel.
+#[tauri::command]
+async fn loot_import_userlist(app: AppHandle, mode: String) -> R<bool> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("LOOT userlist", &["yaml", "yml"])
+        .blocking_pick_file()
+    else {
+        return Ok(false);
+    };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    blocking(move || {
+        read(&app, &mode)?
+            .loot_import_userlist(&path)
+            .map(|()| true)
+    })
+    .await
+}
+
 /// Task: LOOT's proposed order (refreshing a stale masterlist first); applied via `plugins_set`.
 #[tauri::command]
 fn loot_preview(app: AppHandle, id: String, mode: String) {
@@ -1226,6 +1246,7 @@ fn main() {
             plugins_set,
             plugins_export,
             plugins_import,
+            loot_import_userlist,
             loot_preview,
             pick_archive,
             pick_folder,

@@ -1527,6 +1527,19 @@ impl Manager {
         })
     }
 
+    /// Use `src` as this game's LOOT userlist (the user's own sorting rules) from now on.
+    pub fn loot_import_userlist(&self, src: &Path) -> R<()> {
+        let policy = plugins::Policy::new(&self.game, &self.game_path)
+            .ok_or("this game doesn't use plugins")?;
+        loot::import_userlist(
+            &self.game.mode_id,
+            &policy,
+            &self.game_path,
+            &self.mods_dir.join("loot"),
+            src,
+        )
+    }
+
     /// Plugin order + active states as text (C# `PluginManagerVM.ExportLoadOrder`):
     /// `GameMode=<mode>`, then `<plugin>=1|0` per line.
     pub fn export_load_order(&self) -> R<String> {

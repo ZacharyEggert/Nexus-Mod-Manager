@@ -93,6 +93,40 @@ fn update_from(game_base: &str, prelude_base: &str, dir: &Path) -> Result<bool> 
     Ok(changed)
 }
 
+fn err(e: &dyn std::fmt::Display) -> crate::Error {
+    format!("LOOT: {e}").into()
+}
+
+fn open(mode: &str, policy: &Policy, game_path: &Path) -> Result<libloot::Game> {
+    let (kind, _) = game(mode).ok_or("LOOT doesn't support this game")?;
+    let local = policy.plugins_file.parent().unwrap_or(game_path);
+    libloot::Game::with_local_path(kind, game_path, local).map_err(|e| err(&e))
+}
+
+/// The user's own LOOT rules, applied on top of the masterlist (as C# did, beside it).
+pub fn userlist(dir: &Path) -> PathBuf {
+    dir.join("userlist.yaml")
+}
+
+/// Replace the userlist in `dir` with `src` (e.g. LOOT's own `games/<game>/userlist.yaml`).
+/// Refused, leaving the current one alone, when libloot can't load it.
+pub fn import_userlist(
+    mode: &str,
+    policy: &Policy,
+    game_path: &Path,
+    dir: &Path,
+    src: &Path,
+) -> Result<()> {
+    let g = open(mode, policy, game_path)?;
+    let db = g.database();
+    db.write()
+        .map_err(|e| err(&e))?
+        .load_userlist(src)
+        .map_err(|e| err(&format!("{}: {e}", src.display())))?;
+    fs::create_dir_all(dir).at(dir)?;
+    write_durable(&userlist(dir), &fs::read(src).at(src)?)
+}
+
 /// LOOT's order for `names` (given in current load order), using the masterlist in `dir` if any.
 /// Plugins libloot can't read keep their current position.
 pub fn sort(
@@ -102,21 +136,25 @@ pub fn sort(
     dir: &Path,
     names: &[String],
 ) -> Result<Vec<String>> {
-    let (kind, _) = game(mode).ok_or("LOOT doesn't support this game")?;
-    let err = |e: &dyn std::fmt::Display| crate::Error::from(format!("LOOT: {e}"));
-    let local = policy.plugins_file.parent().unwrap_or(game_path);
-    let mut g = libloot::Game::with_local_path(kind, game_path, local).map_err(|e| err(&e))?;
+    let mut g = open(mode, policy, game_path)?;
     let ml = masterlist(dir);
-    if ml.exists() {
+    let user = userlist(dir);
+    {
         let db = g.database();
         let mut db = db.write().map_err(|e| err(&e))?;
-        let prelude = dir.join("prelude.yaml");
-        if prelude.exists() {
-            db.load_masterlist_with_prelude(&ml, &prelude)
-        } else {
-            db.load_masterlist(&ml)
+        if ml.exists() {
+            let prelude = dir.join("prelude.yaml");
+            if prelude.exists() {
+                db.load_masterlist_with_prelude(&ml, &prelude)
+            } else {
+                db.load_masterlist(&ml)
+            }
+            .map_err(|e| err(&e))?;
         }
-        .map_err(|e| err(&e))?;
+        if user.exists() {
+            db.load_userlist(&user)
+                .map_err(|e| err(&format!("userlist.yaml: {e}")))?;
+        }
     }
     let (valid, invalid): (Vec<&String>, Vec<&String>) = names
         .iter()
@@ -190,6 +228,36 @@ mod tests {
         assert!(pos(&sorted, "A.esp") < pos(&sorted, "B.esp"), "{sorted:?}");
         assert_eq!(sorted[0], "Skyrim.esm");
         assert!(!supported("stardewvalley"));
+
+        // Userlist rules join the masterlist's: A after Patch flips their current order.
+        assert!(
+            pos(&sorted, "A.esp") < pos(&sorted, "Patch.esp"),
+            "{sorted:?}"
+        );
+        let src = t.path().join("my userlist.yaml");
+        fs::write(
+            &src,
+            "plugins:\n  - name: 'A.esp'\n    after: [ 'Patch.esp' ]\n",
+        )
+        .unwrap();
+        import_userlist("SkyrimSE", &policy, &game_path, &dir, &src).unwrap();
+        let sorted = sort("SkyrimSE", &policy, &game_path, &dir, &names).unwrap();
+        assert!(
+            pos(&sorted, "Patch.esp") < pos(&sorted, "A.esp"),
+            "{sorted:?}"
+        );
+        assert!(pos(&sorted, "A.esp") < pos(&sorted, "B.esp"), "{sorted:?}");
+
+        // A broken userlist is refused and the current one stays.
+        let bad = t.path().join("bad.yaml");
+        fs::write(&bad, "plugins: [ {name: ").unwrap();
+        let e = import_userlist("SkyrimSE", &policy, &game_path, &dir, &bad).unwrap_err();
+        assert!(e.to_string().contains("bad.yaml"), "{e}");
+        assert_eq!(fs::read(userlist(&dir)).unwrap(), fs::read(&src).unwrap());
+        // ...and one broken on disk fails the sort, naming the file.
+        fs::write(userlist(&dir), "plugins: [ {name: ").unwrap();
+        let e = sort("SkyrimSE", &policy, &game_path, &dir, &names).unwrap_err();
+        assert!(e.to_string().contains("userlist.yaml"), "{e}");
     }
 
     #[test]
