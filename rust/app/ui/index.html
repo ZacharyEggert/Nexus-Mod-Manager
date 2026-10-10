@@ -3,82 +3,8 @@
 <head>
 <meta charset="utf-8">
 <title>Nexus Mod Manager</title>
-<style>
-  :root { --bg:#f5f6f8; --panel:#fff; --fg:#1d2330; --muted:#6b7385; --line:#dfe3ea; --accent:#32689e; --warn:#b5651d; --bad:#b3261e; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg:#16191f; --panel:#1f232b; --fg:#e6e9ef; --muted:#9aa3b5; --line:#2f3540; --accent:#5b9bd5; --warn:#e0a060; --bad:#ef6b62; }
-  }
-  * { box-sizing: border-box; }
-  body { margin:0; font:14px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--fg); display:grid; grid-template-columns:240px 1fr; height:100vh; }
-  aside { background:var(--panel); border-right:1px solid var(--line); overflow:auto; }
-  aside h1 { font-size:15px; margin:0; padding:14px 16px; border-bottom:1px solid var(--line); }
-  aside button { display:block; width:100%; text-align:left; border:0; background:none; color:inherit; padding:9px 16px; cursor:pointer; font:inherit; }
-  aside button:hover { background:var(--bg); }
-  aside button.sel { background:var(--accent); color:#fff; }
-  aside small { display:block; color:var(--muted); font-size:11px; }
-  aside button.sel small { color:#dde8f5; }
-  aside button.foot { border-top:1px solid var(--line); color:var(--muted); }
-  main { display:flex; flex-direction:column; min-width:0; }
-  .bar { display:flex; gap:8px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
-  .bar .grow { flex:1; }
-  button.btn, select, input[type=text] { font:inherit; padding:6px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:inherit; }
-  button.btn { cursor:pointer; }
-  button.btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
-  button.btn:disabled { opacity:.5; cursor:default; }
-  #content { flex:1; overflow:auto; padding:16px; }
-  table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
-  th, td { text-align:left; padding:7px 10px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:500; font-size:12px; }
-  td.num { color:var(--muted); width:40px; }
-  td.act { white-space:nowrap; width:1%; }
-  td.act button { border:0; background:none; color:var(--muted); cursor:pointer; font-size:14px; padding:2px 6px; }
-  td.act button:hover { color:var(--fg); }
-  .conf { color:var(--warn); font-size:12px; }
-  .muted { color:var(--muted); }
-  label.sub { display:block; font-size:12px; cursor:pointer; }
-  .drop { margin-top:16px; border:2px dashed var(--line); border-radius:8px; padding:18px; text-align:center; color:var(--muted); }
-  #status { padding:6px 16px; font-size:12px; color:var(--muted); border-top:1px solid var(--line); background:var(--panel); min-height:28px; }
-  #status.err { color:var(--bad); }
-  #tasks > div { display:flex; gap:10px; align-items:center; padding:6px 16px; font-size:12px; border-top:1px solid var(--line); background:var(--panel); }
-  #tasks progress { flex:1; max-width:320px; }
-  .setup { max-width:560px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; }
-  .setup label { display:block; margin:12px 0 4px; color:var(--muted); font-size:12px; }
-  .row { display:flex; gap:8px; } .row input { flex:1; min-width:0; }
-  dialog { border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--fg); padding:0; width:min(860px, 92vw); }
-  dialog::backdrop { background:#0007; }
-  .wiz { display:grid; grid-template-columns:1fr 300px; min-height:420px; }
-  .wiz header { grid-column:1/-1; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
-  .wiz .opts { padding:12px 16px; overflow:auto; max-height:60vh; }
-  .wiz .opts fieldset { border:1px solid var(--line); border-radius:6px; margin:0 0 12px; }
-  .wiz .opts label { display:block; padding:3px 0; cursor:pointer; }
-  .wiz .opts label.off { opacity:.5; cursor:default; }
-  .wiz .info { border-left:1px solid var(--line); padding:12px; overflow:auto; max-height:60vh; white-space:pre-wrap; font-size:13px; }
-  .wiz .info img { max-width:100%; border-radius:6px; display:block; margin-bottom:8px; }
-  .wiz footer { grid-column:1/-1; display:flex; gap:8px; justify-content:flex-end; padding:10px 16px; border-top:1px solid var(--line); }
-  button:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
-</style>
 </head>
 <body>
-<aside><h1>Nexus Mod Manager</h1><nav id="games"></nav><button id="appsettings" class="foot">App settings</button></aside>
-<main>
-  <div class="bar">
-    <strong id="title">Select a game</strong><span class="grow"></span>
-    <span id="tools" hidden>
-      <button class="btn primary" id="install">Install mod…</button>
-      <select id="profiles" aria-label="Profile"></select>
-      <button class="btn" id="pload">Load</button>
-      <input type="text" id="pname" placeholder="New profile name" aria-label="New profile name" size="14">
-      <button class="btn" id="psave">Save</button>
-      <button class="btn" id="pdel">Delete</button>
-      <button class="btn" id="settings">Settings</button>
-      <button class="btn" id="launch">Launch</button>
-    </span>
-  </div>
-  <div id="content"></div>
-  <div id="tasks"></div>
-  <div id="status" role="status" aria-live="polite"></div>
-</main>
-<dialog id="wizard"></dialog>
-<script src="app.js"></script>
+<script type="module" src="/src/main.ts"></script>
 </body>
 </html>
