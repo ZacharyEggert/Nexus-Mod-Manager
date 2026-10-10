@@ -11,9 +11,11 @@
   let gamePath = $state(game.game_path || game.detected || '');
   // svelte-ignore state_referenced_locally
   let modsDir = $state(game.mods_dir || '');
+  // svelte-ignore state_referenced_locally
+  let launch = $state(game.launch || '');
 
   async function save() {
-    await run('Saving settings', () => api.configure(game.mode_id, gamePath, modsDir || null));
+    await run('Saving settings', () => api.configure(game.mode_id, gamePath, modsDir || null, launch.trim() || null));
     onsaved();
   }
 </script>
@@ -24,5 +26,7 @@
   <PathField id="gp" bind:value={gamePath} />
   <label for="md">Mods folder (same drive as the game, so files can be hard-linked)</label>
   <PathField id="md" bind:value={modsDir} placeholder="Default (see App settings)" />
+  <label for="lc">Launch command (in the game folder, or a full path)</label>
+  <div class="row"><input type="text" id="lc" bind:value={launch} placeholder={game.default_launch ? `Default: ${game.default_launch}` : ''} /></div>
   <p><button class="btn primary" onclick={save}>Save</button></p>
 </div>

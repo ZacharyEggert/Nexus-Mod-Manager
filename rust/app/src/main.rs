@@ -47,6 +47,9 @@ enum NexusApi {
 struct GameConfig {
     game_path: PathBuf,
     mods_dir: PathBuf,
+    /// Custom launch command (e.g. SMAPI); `None` = the definition's executable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch: Option<String>,
 }
 
 #[derive(Default)]
@@ -268,6 +271,9 @@ struct GameInfo {
     name: String,
     game_path: Option<PathBuf>,
     mods_dir: Option<PathBuf>,
+    launch: Option<String>,
+    /// What Launch runs when `launch` is unset.
+    default_launch: Option<String>,
     detected: Option<PathBuf>,
 }
 
@@ -282,6 +288,8 @@ async fn games(app: AppHandle) -> Vec<GameInfo> {
                 detected: discover::detect(&g),
                 game_path: c.map(|c| c.game_path.clone()),
                 mods_dir: c.map(|c| c.mods_dir.clone()),
+                launch: c.and_then(|c| c.launch.clone()),
+                default_launch: g.default_executable().map(String::from),
                 mode_id: g.mode_id,
                 name: g.name,
             }
@@ -297,6 +305,7 @@ async fn configure(
     mode: String,
     game_path: PathBuf,
     mods_dir: Option<PathBuf>,
+    launch: Option<String>,
 ) -> R<()> {
     if !game_path.is_dir() {
         return Err(format!("{} is not a folder", game_path.display()).into());
@@ -313,6 +322,7 @@ async fn configure(
             GameConfig {
                 game_path,
                 mods_dir,
+                launch: launch.filter(|l| !l.trim().is_empty()),
             },
         );
     })?;
@@ -572,9 +582,13 @@ fn adopt(app: AppHandle, id: String, mode: String) {
 async fn launch(app: AppHandle, mode: String) -> R<()> {
     // read() waits for this game's tasks, so the game never starts mid-deploy.
     let m = read(&app, &mode)?;
+    let custom = load_config(&app)
+        .games
+        .get(&mode)
+        .and_then(|c| c.launch.clone());
     let exe = m
         .game
-        .executable(&m.game_path)
+        .executable(&m.game_path, custom.as_deref())
         .ok_or("no executable defined")?;
     std::process::Command::new(&exe)
         .current_dir(&m.game_path)

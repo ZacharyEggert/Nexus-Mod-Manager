@@ -12,6 +12,9 @@ export interface GameInfo {
   name: string;
   game_path: string | null;
   mods_dir: string | null;
+  /** Custom launch command (e.g. SMAPI); null = default_launch. */
+  launch: string | null;
+  default_launch: string | null;
   detected: string | null;
 }
 
@@ -107,7 +110,8 @@ export type Op =
 // ---------- plain commands ----------
 
 export const games = () => invoke<GameInfo[]>('games');
-export const configure = (mode: string, gamePath: string, modsDir: string | null) => invoke<void>('configure', { mode, gamePath, modsDir });
+export const configure = (mode: string, gamePath: string, modsDir: string | null, launch: string | null) =>
+  invoke<void>('configure', { mode, gamePath, modsDir, launch });
 export const library = (mode: string) => invoke<Library>('library', { mode });
 export const pickArchive = () => invoke<string | null>('pick_archive');
 export const pickFolder = () => invoke<string | null>('pick_folder');

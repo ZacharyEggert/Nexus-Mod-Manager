@@ -208,13 +208,25 @@ impl GameDef {
         has_ext(file, &self.mod_install.real_file_required_extensions)
     }
 
-    pub fn executable(&self, game_path: &Path) -> Option<PathBuf> {
-        let exe = self
-            .launcher
+    pub fn default_executable(&self) -> Option<&str> {
+        self.launcher
             .as_ref()
-            .and_then(|l| l.default_executable.clone())
-            .or_else(|| self.game_executables.first().cloned())?;
-        Some(expand(&exe, game_path))
+            .and_then(|l| l.default_executable.as_deref())
+            .or(self.game_executables.first().map(String::as_str))
+    }
+
+    /// What Launch runs: the user's custom command (relative = in the game folder), else the definition's.
+    pub fn executable(&self, game_path: &Path, custom: Option<&str>) -> Option<PathBuf> {
+        let exe = expand(custom.or(self.default_executable())?, game_path);
+        // Definitions name the Windows .exe; native mac/Linux builds ship the same name without it.
+        if cfg!(not(windows)) && !exe.exists() && has_ext(&exe.to_string_lossy(), &[".exe".into()])
+        {
+            let native = exe.with_extension("");
+            if native.exists() {
+                return Some(native);
+            }
+        }
+        Some(exe)
     }
 }
 
@@ -235,5 +247,26 @@ mod tests {
         assert_eq!(sse.active_marker(), "*");
         assert!(sse.mod_install.supports_game_root_install);
         assert_eq!(sse.data_dir_name(), Some("Data"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn executable_falls_back_to_native_binary() {
+        let sdv = super::find("stardewvalley").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // No native binary: keep the .exe path (error names what the definition asked for).
+        assert_eq!(
+            sdv.executable(dir.path(), None).unwrap(),
+            dir.path().join("Stardew Valley.exe")
+        );
+        std::fs::write(dir.path().join("Stardew Valley"), "").unwrap();
+        assert_eq!(
+            sdv.executable(dir.path(), None).unwrap(),
+            dir.path().join("Stardew Valley")
+        );
+        // Custom command (SMAPI) wins, with the same fallback.
+        std::fs::write(dir.path().join("StardewModdingAPI"), "").unwrap();
+        let smapi = sdv.executable(dir.path(), Some("StardewModdingAPI.exe"));
+        assert_eq!(smapi.unwrap(), dir.path().join("StardewModdingAPI"));
     }
 }
