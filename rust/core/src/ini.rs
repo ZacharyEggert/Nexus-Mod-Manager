@@ -6,11 +6,11 @@ use crate::{write_durable, IoContext, Result};
 use std::path::Path;
 
 /// INI files are ANSI; Latin-1 round-trips every byte.
-fn decode(bytes: &[u8]) -> String {
+pub(crate) fn decode(bytes: &[u8]) -> String {
     bytes.iter().map(|&b| b as char).collect()
 }
 
-fn encode(s: &str) -> Vec<u8> {
+pub(crate) fn encode(s: &str) -> Vec<u8> {
     s.chars().map(|c| c as u32 as u8).collect()
 }
 
@@ -21,7 +21,7 @@ fn section_of(line: &str) -> Option<&str> {
         .map(|(s, _)| s.trim())
 }
 
-fn key_of(line: &str) -> Option<&str> {
+pub(crate) fn key_of(line: &str) -> Option<&str> {
     let t = line.trim_start();
     if t.starts_with(';') || t.starts_with('#') {
         return None;

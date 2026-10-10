@@ -243,6 +243,65 @@ impl ArchiveInvalidation {
     }
 }
 
+/// Starfield loads loose files only with `[Archive] bInvalidateOlderFiles=1` and an empty
+/// `sResourceDataDirsFinal=` in StarfieldCustom.ini; old `sTestFile1..10` plugin entries must go.
+/// Port of C# `DataDrivenGamebryoGameMode.EnsureStarfieldCustomIni`: creates the file when
+/// missing, backs it up once to `<ini>.nmm_backup` before the first change. None if not Starfield.
+pub fn starfield_loose_files(game: &GameDef, game_path: &Path) -> Option<Result<()>> {
+    if game.mod_install.path_adjustment_profile != crate::adjust::Profile::Starfield {
+        return None;
+    }
+    let ini = game.gamebryo.as_ref()?.ini_file_path.as_deref()?;
+    Some(ensure_starfield_ini(&game.settings_path(ini, game_path)))
+}
+
+fn ensure_starfield_ini(path: &Path) -> Result<()> {
+    let exists = path.exists();
+    let old = if exists {
+        ini::decode(&fs::read(path).at(path)?)
+    } else {
+        String::new()
+    };
+    let new = starfield_ini_text(&old);
+    if exists && new == old {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).at(dir)?;
+    }
+    let backup = PathBuf::from(format!("{}.nmm_backup", path.display()));
+    if exists && !backup.exists() {
+        fs::copy(path, &backup).at(&backup)?;
+    }
+    crate::write_durable(path, &ini::encode(&new))
+}
+
+fn starfield_ini_text(text: &str) -> String {
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let test_file = |l: &str| {
+        ini::key_of(l).is_some_and(|k| {
+            k.get(..9)
+                .is_some_and(|p| p.eq_ignore_ascii_case("sTestFile"))
+                && k[9..].parse::<u32>().is_ok_and(|n| (1..=10).contains(&n))
+        })
+    };
+    let kept: Vec<&str> = text.lines().filter(|l| !test_file(l)).collect();
+    let mut t = if kept.len() == text.lines().count() {
+        text.to_string()
+    } else {
+        kept.join(nl) + nl
+    };
+    for (key, value) in [
+        ("bInvalidateOlderFiles", "1"),
+        ("sResourceDataDirsFinal", ""),
+    ] {
+        if ini::get_in(&t, "Archive", key).as_deref() != Some(value) {
+            t = ini::set_in(&t, "Archive", key, value);
+        }
+    }
+    t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +454,61 @@ mod tests {
         assert!(
             ArchiveInvalidation::new(&crate::game::find("SkyrimSE").unwrap(), t.path()).is_none()
         );
+    }
+
+    #[test]
+    fn starfield_ini_enables_loose_files() {
+        // Missing file: created with just the [Archive] settings.
+        assert_eq!(
+            starfield_ini_text(""),
+            "[Archive]\nbInvalidateOlderFiles=1\nsResourceDataDirsFinal=\n"
+        );
+        // Existing: wrong values replaced in place, sTestFile1..10 dropped (not 11, not comments).
+        let text = "[General]\r\nsTestFile1=a.esp\r\nSTESTFILE10=b.esp\r\nsTestFile11=c.esp\r\n; sTestFile2=d\r\n\r\n[archive]\r\nbInvalidateOlderFiles=0\r\nsResourceDataDirsFinal=STRINGS\\\r\n";
+        assert_eq!(
+            starfield_ini_text(text),
+            "[General]\r\nsTestFile11=c.esp\r\n; sTestFile2=d\r\n\r\n[archive]\r\nbInvalidateOlderFiles=1\r\nsResourceDataDirsFinal=\r\n"
+        );
+        // Already right: untouched.
+        let ok = "[Archive]\r\nbInvalidateOlderFiles=1\r\nsResourceDataDirsFinal=\r\n";
+        assert_eq!(starfield_ini_text(ok), ok);
+    }
+
+    #[test]
+    fn starfield_ini_file_backup_once() {
+        let t = tempfile::tempdir().unwrap();
+        let mut game = crate::game::find("Starfield").unwrap();
+        let g = game.gamebryo.as_mut().unwrap();
+        g.user_game_data_path = Some(t.path().join("My Games/Starfield").to_string_lossy().into());
+        let ini = t.path().join("My Games/Starfield/StarfieldCustom.ini");
+        let bak = t
+            .path()
+            .join("My Games/Starfield/StarfieldCustom.ini.nmm_backup");
+        // Missing folder + file: created, nothing to back up.
+        starfield_loose_files(&game, t.path()).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(&ini).unwrap(),
+            "[Archive]\nbInvalidateOlderFiles=1\nsResourceDataDirsFinal=\n"
+        );
+        assert!(!bak.exists());
+        // User breaks it: fixed, original kept as backup; a second fix keeps the first backup.
+        fs::write(&ini, "[Archive]\nbInvalidateOlderFiles=0\n").unwrap();
+        starfield_loose_files(&game, t.path()).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(&bak).unwrap(),
+            "[Archive]\nbInvalidateOlderFiles=0\n"
+        );
+        fs::write(&ini, "[Archive]\nsTestFile1=x.esp\n").unwrap();
+        starfield_loose_files(&game, t.path()).unwrap().unwrap();
+        assert_eq!(
+            fs::read_to_string(&bak).unwrap(),
+            "[Archive]\nbInvalidateOlderFiles=0\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&ini).unwrap(),
+            "[Archive]\nbInvalidateOlderFiles=1\nsResourceDataDirsFinal=\n"
+        );
+        // Other games: no-op.
+        assert!(starfield_loose_files(&crate::game::find("Fallout4").unwrap(), t.path()).is_none());
     }
 }

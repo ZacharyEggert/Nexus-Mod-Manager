@@ -1043,6 +1043,14 @@ impl Manager {
                 &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
             )?;
         }
+        if !journal.is_empty() {
+            // Best effort, as in C#: a mod still deploys when the INI can't be fixed.
+            if let Some(Err(e)) =
+                crate::invalidation::starfield_loose_files(&self.game, &self.game_path)
+            {
+                tracing::warn!("StarfieldCustom.ini could not be configured for loose files: {e}");
+            }
+        }
         let result = self.apply(&journal);
         match &result {
             Ok(()) if !journal.is_empty() => {
@@ -2926,5 +2934,30 @@ mod tests {
         assert_eq!(find_prefix(t.path(), &game), t.path().join("wrap/inner"));
         fs::create_dir_all(t.path().join("wrap/other")).unwrap();
         assert_eq!(find_prefix(t.path(), &game), t.path());
+    }
+
+    #[test]
+    fn starfield_deploy_enables_loose_files() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        let mut game = crate::game::find("Starfield").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        let ini = t.path().join("My Games/StarfieldCustom.ini");
+        game.gamebryo.as_mut().unwrap().user_game_data_path =
+            Some(t.path().join("My Games").to_string_lossy().into());
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
+        let z = t.path().join("A.zip");
+        zip(&z, &[("Data/textures/a.dds", "A")]);
+        let s = m.stage(&z).unwrap();
+        m.install(s, None).unwrap();
+        assert!(fs::read_to_string(&ini)
+            .unwrap()
+            .contains("sResourceDataDirsFinal="));
+        // An INI that can't be written doesn't block deploys.
+        fs::remove_file(&ini).unwrap();
+        fs::create_dir(&ini).unwrap();
+        m.set_active("A", false).unwrap();
+        assert!(!game_path.join("Data/textures/a.dds").exists());
     }
 }
