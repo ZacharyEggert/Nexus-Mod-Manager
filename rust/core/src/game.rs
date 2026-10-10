@@ -52,6 +52,15 @@ pub struct GameDef {
     pub mod_install: ModInstallDef,
     pub launcher: Option<LauncherDef>,
     pub gamebryo: Option<GamebryoDef>,
+    /// Base game masters: always active, pinned at the top in this order.
+    #[serde(default)]
+    pub ordered_critical_plugin_names: Vec<String>,
+    /// DLC: fixed order right after the critical plugins.
+    #[serde(default)]
+    pub ordered_official_plugin_names: Vec<String>,
+    /// Official plugins the game loads on its own (Creation Club); also read from `.ccc` files.
+    #[serde(default)]
+    pub ordered_official_unmanaged_plugin_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,13 +91,34 @@ pub struct PluginDef {
     pub uses_plugins: bool,
     pub plugin_directory_suffix: Option<String>,
     pub policy: Option<PluginPolicy>,
+    /// 0 = no limit.
+    #[serde(default)]
+    pub max_allowed_active_plugins_count: usize,
+    /// Files listing official unmanaged plugins, one per line (`{GamePath}\Skyrim.ccc`).
+    #[serde(default)]
+    pub official_unmanaged_plugin_list_files: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `plugin.policy`: how the game persists load order (C# `PluginManagementPolicy`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginPolicy {
+    pub persistence_strategy: Option<String>,
     pub plugins_file_path: Option<String>,
+    pub load_order_file_path: Option<String>,
     pub active_marker: Option<String>,
+    pub use_timestamp_order: Option<bool>,
+    pub ignore_official_plugins: Option<bool>,
+    pub single_file_management: Option<bool>,
+    pub official_plugins_are_implicitly_active: Option<bool>,
+    pub load_order_in_plugin_directory: Option<bool>,
+    pub show_starfield_custom_plugins_header: Option<bool>,
+    #[serde(default)]
+    pub official_plugins: Vec<String>,
+    #[serde(default)]
+    pub fixed_order_plugins: Vec<String>,
+    #[serde(default)]
+    pub forced_active_plugins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -130,11 +160,21 @@ pub fn find(mode_id: &str) -> Option<GameDef> {
 
 /// Expand `{GamePath}`-style tokens and Windows separators into a native path.
 pub fn expand(template: &str, game_path: &Path) -> PathBuf {
+    expand_in(template, game_path, None)
+}
+
+/// `expand`, with the Windows user folders taken from `user` (a Wine/Proton prefix's
+/// `drive_c/users/<name>`) instead of this OS's.
+fn expand_in(template: &str, game_path: &Path, user: Option<&Path>) -> PathBuf {
+    let (local, docs) = match user {
+        Some(u) => (Some(u.join("AppData/Local")), Some(u.join("Documents"))),
+        None => (dirs::data_local_dir(), dirs::document_dir()),
+    };
     let tokens: [(&str, Option<PathBuf>); 6] = [
         ("{GamePath}", Some(game_path.to_path_buf())),
-        ("{LocalApplicationData}", dirs::data_local_dir()),
-        ("{PersonalData}", dirs::document_dir()),
-        ("{Documents}", dirs::document_dir()),
+        ("{LocalApplicationData}", local),
+        ("{PersonalData}", docs.clone()),
+        ("{Documents}", docs),
         ("{ProgramFiles}", Some(PathBuf::from(r"C:\Program Files"))),
         ("{UserGameData}", None),
     ];
@@ -175,6 +215,46 @@ impl GameDef {
         s.rsplit(['\\', '/']).next()
     }
 
+    /// The Proton prefix's Windows user folder, for a Windows game run through Steam Play:
+    /// `<library>/steamapps/compatdata/<appid>/pfx/drive_c/users/steamuser`. None on Windows,
+    /// for native games, or before the game's first launch created the prefix.
+    pub fn windows_user_dir(&self, game_path: &Path) -> Option<PathBuf> {
+        if cfg!(windows) {
+            return None;
+        }
+        let steamapps = game_path.ancestors().find(|a| {
+            a.file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("steamapps"))
+        })?;
+        self.discovery
+            .stores
+            .iter()
+            .filter(|s| s.store == "Steam")
+            .filter_map(|s| s.id.as_deref())
+            .map(|id| {
+                steamapps
+                    .join("compatdata")
+                    .join(id)
+                    .join("pfx/drive_c/users/steamuser")
+            })
+            .find(|p| p.is_dir())
+    }
+
+    /// `expand` for this game: Windows user folders resolve inside its Proton prefix when it has one.
+    pub fn path(&self, template: &str, game_path: &Path) -> PathBuf {
+        expand_in(
+            template,
+            game_path,
+            self.windows_user_dir(game_path).as_deref(),
+        )
+    }
+
+    /// Folder the game loads plugins from (`Data`).
+    pub fn plugin_dir(&self, game_path: &Path) -> Option<PathBuf> {
+        let suffix = self.plugin.as_ref()?.plugin_directory_suffix.as_deref()?;
+        Some(expand(suffix, game_path))
+    }
+
     pub fn plugins_file(&self, game_path: &Path) -> Option<PathBuf> {
         let p = self.plugin.as_ref()?;
         if !p.uses_plugins {
@@ -188,7 +268,7 @@ impl GameDef {
                 .gamebryo
                 .as_ref()
                 .and_then(|g| g.plugins_file_path.as_deref()))?;
-        Some(expand(path, game_path))
+        Some(self.path(path, game_path))
     }
 
     pub fn active_marker(&self) -> &str {

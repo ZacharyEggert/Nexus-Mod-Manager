@@ -13,9 +13,10 @@
 use crate::adjust::{self, Dest};
 use crate::fomod::{self, ModuleConfig, Selection};
 use crate::game::{has_ext, GameDef};
+use crate::plugins;
 use crate::{write_durable, Error, IoContext, Task};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -444,7 +445,7 @@ impl Manager {
                     m.scan()?;
                 }
             }
-            m.finish()?;
+            m.finish(&HashSet::new())?;
             // The kill interrupted a change (or its rollback) before state was saved: deploy the
             // saved intent so the game holds all of it or none, not half a mod until a manual redeploy.
             // ponytail: a failure here just leaves in_sync() false; the UI offers Redeploy.
@@ -977,13 +978,18 @@ impl Manager {
         if result.is_err() {
             self.reconcile(&candidates(&journal))?;
         }
-        self.finish()?;
+        let added = journal
+            .iter()
+            .filter(|(_, (old, new))| old.is_none() && new.as_ref().is_some_and(|d| !d.game_root))
+            .map(|(k, _)| k.clone())
+            .collect();
+        self.finish(&added)?;
         result
     }
 
     /// Persist state after a deploy or recovery; only then is the journal obsolete.
-    fn finish(&self) -> R<()> {
-        self.sync_plugins()?;
+    fn finish(&self, added: &HashSet<String>) -> R<()> {
+        self.sync_plugins(added)?;
         self.save()?;
         match fs::remove_file(self.journal_path()) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::Io {
@@ -1168,7 +1174,7 @@ impl Manager {
             m.game_root = live.iter().any(|(id, root)| *id == m.id && *root);
         }
         tracing::info!(?ids, "re-added stray mods");
-        self.finish()?;
+        self.finish(&HashSet::new())?;
         self.deploy()?;
         Ok(report)
     }
@@ -1177,7 +1183,7 @@ impl Manager {
     /// `deployed` or a backup knows, then redeploy the saved intent.
     pub fn repair(&mut self) -> R<RepairReport> {
         let report = self.scan()?;
-        self.finish()?;
+        self.finish(&HashSet::new())?;
         self.deploy()?;
         Ok(report)
     }
@@ -1304,50 +1310,25 @@ impl Manager {
         out
     }
 
-    /// Rewrite our entries in plugins.txt; lines for plugins we don't manage are kept.
-    fn sync_plugins(&self) -> R<()> {
-        let Some(path) = self.game.plugins_file(&self.game_path) else {
+    /// Persist the plugin load order after a deploy. `added` are paths this deploy linked fresh:
+    /// their plugins load last and start active (C# `IntegrateDeployedPlugins`); everything else
+    /// keeps the order and state the game's files already hold.
+    fn sync_plugins(&self, added: &HashSet<String>) -> R<()> {
+        let Some(policy) = plugins::Policy::new(&self.game, &self.game_path) else {
             return Ok(());
         };
-        let marker = self.game.active_marker();
-        let ours = |name: &str| {
-            self.state
-                .mods
-                .iter()
-                .flat_map(|m| &m.files)
-                .any(|f| f.eq_ignore_ascii_case(name))
-        };
-        let existing = fs::read_to_string(&path).unwrap_or_default();
-        let mut lines: Vec<String> = existing
-            .lines()
-            .filter(|l| !ours(l.trim().trim_start_matches('*')))
-            .map(str::to_string)
-            .collect();
-        // ponytail: managed plugins follow mod load order; per-plugin ordering UI not ported.
-        for m in self.state.mods.iter().filter(|m| m.active) {
-            for f in m
-                .files
-                .iter()
-                .filter(|f| !f.contains('/') && self.game.is_plugin(f))
-            {
-                if self
-                    .state
-                    .deployed
-                    .get(&f.to_lowercase())
-                    .is_some_and(|d| d.mod_id == m.id)
-                {
-                    lines.push(format!("{marker}{f}"));
+        let mut list = policy.read();
+        for m in &self.state.mods {
+            for f in m.files.iter().filter(|f| added.contains(&key(f, false))) {
+                if let Some(i) = list.iter().position(|p| p.name.eq_ignore_ascii_case(f)) {
+                    let mut p = list.remove(i);
+                    p.active = true;
+                    list.push(p);
                 }
             }
         }
-        let body = lines.join("\r\n");
-        if body.trim() == existing.trim() {
-            return Ok(());
-        }
-        if let Some(p) = path.parent() {
-            fs::create_dir_all(p).at(p)?;
-        }
-        fs::write(&path, body + "\r\n").at(&path)
+        policy.correct(&mut list, plugins::ext_master);
+        policy.write(&list)
     }
 }
 
@@ -1438,6 +1419,48 @@ mod tests {
         let reopened =
             Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
         assert_eq!(reopened.state.mods.len(), 1);
+    }
+
+    #[test]
+    fn deployed_plugins_join_load_order() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("Skyrim.esm"), "").unwrap();
+        let txt = t.path().join("appdata/plugins.txt");
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let mut m = Manager::open(game, game_path, t.path().join("mods")).unwrap();
+        let mut add = |name: &str, files: &[(&str, &str)]| {
+            let a = t.path().join(format!("{name}.zip"));
+            zip(&a, files);
+            let s = m.stage(&a).unwrap();
+            m.install(s, None).unwrap();
+        };
+        add("ModA", &[("A.esp", "")]);
+        add("ModB", &[("B.esp", ""), ("B.esm", "")]);
+        let body = || fs::read_to_string(&txt).unwrap();
+        let header =
+            "# This file is used by the game to keep track of your downloaded content.\r\n";
+        assert_eq!(body(), format!("{header}*B.esm\r\n*A.esp\r\n*B.esp\r\n"));
+
+        // The user's order and choices survive later deploys; a new plugin loads last, active.
+        fs::write(&txt, "*B.esm\r\n*B.esp\r\nA.esp\r\n").unwrap();
+        add("ModC", &[("C.esp", "")]);
+        assert_eq!(
+            body(),
+            format!("{header}*B.esm\r\n*B.esp\r\nA.esp\r\n*C.esp\r\n")
+        );
+        // Disabling a mod drops its plugins; enabling it again appends them.
+        m.set_active("ModB", false).unwrap();
+        assert_eq!(body(), format!("{header}A.esp\r\n*C.esp\r\n"));
+        m.set_active("ModB", true).unwrap();
+        assert_eq!(
+            body(),
+            format!("{header}*B.esm\r\nA.esp\r\n*C.esp\r\n*B.esp\r\n")
+        );
     }
 
     /// Cancel at the Nth progress step: extract leaves no staging junk; a cancelled install,

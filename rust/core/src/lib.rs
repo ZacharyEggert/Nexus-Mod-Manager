@@ -6,6 +6,7 @@ pub mod fomod;
 pub mod game;
 pub mod manager;
 pub mod nexus;
+pub mod plugins;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
