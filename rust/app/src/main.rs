@@ -29,18 +29,9 @@ struct Settings {
     mods_root: Option<PathBuf>,
     /// Link mode newly set-up games start with.
     link_mode: LinkMode,
-    nexus_api: NexusApi,
+    nexus_api: nmm_core::nexus::Api,
     /// Quit after launching a game.
     close_on_launch: bool,
-}
-
-// ponytail: stored only; the Nexus client (#12) reads it.
-#[derive(Clone, Copy, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum NexusApi {
-    #[default]
-    Graphql,
-    Rest,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -695,6 +686,6 @@ mod tests {
         assert!(cfg.settings.mods_root.is_none() && !cfg.settings.close_on_launch);
         assert_eq!(cfg.settings.link_mode, LinkMode::Auto);
         let back: Config = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
-        assert!(matches!(back.settings.nexus_api, NexusApi::Graphql));
+        assert_eq!(back.settings.nexus_api, nmm_core::nexus::Api::Graphql);
     }
 }

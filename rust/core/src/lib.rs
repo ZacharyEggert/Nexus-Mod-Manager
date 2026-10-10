@@ -4,6 +4,7 @@ pub mod discover;
 pub mod fomod;
 pub mod game;
 pub mod manager;
+pub mod nexus;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,14 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// Nexus rejected the API key.
+    #[error("Nexus: invalid or missing API key")]
+    Unauthorized,
+    /// Nexus quota spent; calls fail locally for a while instead of hammering the API.
+    #[error("Nexus: rate limit reached, try again later")]
+    RateLimited,
+    #[error("Nexus: {message} (HTTP {status})")]
+    Http { status: u16, message: String },
     // ponytail: archive/XML/JSON errors are flattened to text; add variants when a caller branches on one.
     #[error("{0}")]
     Other(String),

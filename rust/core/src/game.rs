@@ -208,6 +208,16 @@ impl GameDef {
         has_ext(file, &self.mod_install.real_file_required_extensions)
     }
 
+    /// Nexus Mods game domain (`skyrimspecialedition`), per C# `GameDomainTranslator`.
+    pub fn nexus_domain(&self) -> String {
+        match self.mode_id.to_ascii_lowercase().as_str() {
+            "skyrimse" | "skyrimgog" | "skyrimvr" => "skyrimspecialedition".into(),
+            "falloutnv" => "newvegas".into(),
+            "fallout4vr" => "fallout4".into(),
+            m => m.into(),
+        }
+    }
+
     pub fn default_executable(&self) -> Option<&str> {
         self.launcher
             .as_ref()
@@ -247,6 +257,8 @@ mod tests {
         assert_eq!(sse.active_marker(), "*");
         assert!(sse.mod_install.supports_game_root_install);
         assert_eq!(sse.data_dir_name(), Some("Data"));
+        assert_eq!(sse.nexus_domain(), "skyrimspecialedition");
+        assert_eq!(super::find("FalloutNV").unwrap().nexus_domain(), "newvegas");
     }
 
     #[cfg(not(windows))]
