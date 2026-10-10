@@ -3,11 +3,12 @@
 //! vs deployed links and applies the difference.
 //!
 //! Layout under `mods_dir`: `VirtualInstall/<id>/…` extracted mod files, `Backup/…` game files
-//! displaced by mods, `.staging/` scratch, `state.json`, and `deploy.journal` while a deploy
+//! displaced by mods, `GameRootInstall/<id>/…` + `GameRootBackup/…` the same for files deployed to
+//! the game root instead of the install root (script extenders), `.staging/` scratch, `state.json`, and `deploy.journal` while a deploy
 //! is in flight (reconciled against the filesystem on the next `open` if we died mid-deploy).
 
 use crate::fomod::{self, ModuleConfig, Selection};
-use crate::game::GameDef;
+use crate::game::{has_ext, GameDef};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -26,20 +27,57 @@ pub struct ModEntry {
     pub archive: String,
     /// Paths relative to the install root, `/`-separated.
     pub files: Vec<String>,
+    /// Paths relative to the game root, outside the install root (e.g. `skse64_loader.exe`).
+    /// Only deployed while `game_root` is on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_files: Vec<String>,
+    /// Per-mod "install to game root" toggle (C# `ModInstallRoot.GameRoot`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub game_root: bool,
     pub active: bool,
+}
+
+impl ModEntry {
+    /// (path, is game-root) for every file this mod deploys right now.
+    fn deployable(&self) -> impl Iterator<Item = (&String, bool)> {
+        let root = if self.game_root { &self.root_files[..] } else { &[] };
+        self.files.iter().map(|f| (f, false)).chain(root.iter().map(|f| (f, true)))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Deployed {
     pub path: String,
     pub mod_id: String,
+    /// `path` is relative to the game root, not the install root.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub game_root: bool,
+}
+
+/// `deployed` key. Game-root paths get a leading `/` so `x.dll` in the root and in Data don't collide.
+fn key(path: &str, game_root: bool) -> String {
+    let lower = path.to_lowercase();
+    if game_root { format!("/{lower}") } else { lower }
+}
+
+/// Where one deployed path lives on disk.
+struct Place {
+    /// Live file in the game.
+    target: PathBuf,
+    /// Game file displaced by the mod.
+    saved: PathBuf,
+    /// The mod's own copy.
+    src: PathBuf,
+    /// Dirs that `target` / `saved` are pruned up to.
+    root: PathBuf,
+    backup: PathBuf,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     /// Load order: later entries win file conflicts.
     pub mods: Vec<ModEntry>,
-    /// Lower-cased relative path -> what is currently linked there.
+    /// `key()` of the relative path -> what is currently linked there.
     pub deployed: BTreeMap<String, Deployed>,
     /// Profile name -> active mod ids.
     pub profiles: BTreeMap<String, Vec<String>>,
@@ -113,6 +151,20 @@ pub fn find_prefix(dir: &Path, game: &GameDef) -> PathBuf {
             _ => return dir.to_path_buf(),
         }
     }
+}
+
+/// Files beside the archive's Data folder, as (source, game-root path), when `prefix` is that
+/// Data folder; plus whether the mod's game-root toggle should default on.
+// ponytail: default-on when a sibling is exe/dll/asi (script extenders, ENB); the user flips it otherwise.
+fn game_root_files(dir: &Path, prefix: &Path, game: &GameDef) -> (Vec<(PathBuf, String)>, bool) {
+    let is_data = |p: &Path| game.data_dir_name().zip(p.file_name()).is_some_and(|(d, n)| n.eq_ignore_ascii_case(d));
+    let Some(base) = prefix.parent().filter(|_| game.mod_install.supports_game_root_install && prefix != dir && is_data(prefix)) else {
+        return (vec![], false);
+    };
+    let files: Vec<_> = files_under(base).into_iter().filter(|f| !f.starts_with(prefix)).collect();
+    let binary = files.iter().any(|f| has_ext(&f.to_string_lossy(), &[".exe".into(), ".dll".into(), ".asi".into()]));
+    let files = files.into_iter().map(|f| (rel(&f, base), f)).filter(|(r, _)| !r.to_lowercase().starts_with("fomod/")).map(|(r, f)| (f, r)).collect();
+    (files, binary)
 }
 
 fn link_or_copy(src: &Path, dst: &Path, real_copy: bool) -> R<()> {
@@ -215,6 +267,15 @@ impl Manager {
         self.game.install_root(&self.game_path)
     }
 
+    fn place(&self, d: &Deployed) -> Place {
+        let (root, backup, store) = if d.game_root {
+            (self.game_path.clone(), self.mods_dir.join("GameRootBackup"), self.mods_dir.join("GameRootInstall").join(&d.mod_id))
+        } else {
+            (self.install_root(), self.mods_dir.join("Backup"), self.virtual_dir(&d.mod_id))
+        };
+        Place { target: root.join(&d.path), saved: backup.join(&d.path), src: store.join(&d.path), root, backup }
+    }
+
     /// fileDependency state for FOMod conditions.
     pub fn file_state(&self, name: &str) -> String {
         // ponytail: no Inactive state; a present file counts as Active.
@@ -241,14 +302,15 @@ impl Manager {
 
     /// Install a staged archive. `sel` is required when the archive is a FOMod.
     pub fn install(&mut self, staged: Staged, sel: Option<&Selection>) -> R<()> {
-        // dest (lower) -> (source, dest); later inserts win, matching FOMod priority order.
-        let mut map: BTreeMap<String, (PathBuf, String)> = BTreeMap::new();
-        let mut put = |src: PathBuf, dest: String| {
+        // key(dest) -> (source, dest, game_root); later inserts win, matching FOMod priority order.
+        let mut map: BTreeMap<String, (PathBuf, String, bool)> = BTreeMap::new();
+        let mut put = |src: PathBuf, dest: String, game_root: bool| {
             if !IGNORED.iter().any(|i| dest.rsplit('/').next().unwrap_or("").eq_ignore_ascii_case(i)) {
-                map.insert(dest.to_lowercase(), (src, dest));
+                map.insert(key(&dest, game_root), (src, dest, game_root));
             }
         };
         let name;
+        let mut game_root = false;
         match (&staged.fomod, sel) {
             (Some((base, cfg)), Some(sel)) => {
                 name = if cfg.name.is_empty() { staged.id.clone() } else { cfg.name.clone() };
@@ -265,11 +327,11 @@ impl Manager {
                     if f.is_folder {
                         for file in files_under(src) {
                             let r = rel(&file, src);
-                            put(file, if dest.is_empty() { r } else { format!("{dest}/{r}") });
+                            put(file, if dest.is_empty() { r } else { format!("{dest}/{r}") }, false);
                         }
                     } else {
                         let d = if dest.is_empty() || dest == "." { f.source.rsplit('/').next().unwrap().to_string() } else { dest.to_string() };
-                        put(src.clone(), d);
+                        put(src.clone(), d, false);
                     }
                 }
             }
@@ -280,20 +342,23 @@ impl Manager {
                 for file in files_under(&prefix) {
                     let r = rel(&file, &prefix);
                     if !r.to_lowercase().starts_with("fomod/") {
-                        put(file, r);
+                        put(file, r, false);
                     }
+                }
+                let (root, on) = game_root_files(&staged.dir, &prefix, &self.game);
+                game_root = on;
+                for (file, r) in root {
+                    put(file, r, true);
                 }
             }
         }
 
-        let vdir = self.virtual_dir(&staged.id);
-        let _ = fs::remove_dir_all(&vdir);
-        let mut files = vec![];
-        for (src, dest) in map.into_values() {
-            let to = vdir.join(&dest);
+        let (mut files, mut root_files) = (vec![], vec![]);
+        for (src, dest, game_root) in map.into_values() {
+            let to = self.place(&Deployed { path: dest.clone(), mod_id: staged.id.clone(), game_root }).src;
             fs::create_dir_all(to.parent().unwrap()).map_err(err)?;
             fs::copy(&src, &to).map_err(err)?;
-            files.push(dest);
+            if game_root { &mut root_files } else { &mut files }.push(dest);
         }
         let _ = fs::remove_dir_all(&staged.dir);
         self.state.mods.push(ModEntry {
@@ -301,6 +366,8 @@ impl Manager {
             name,
             archive: staged.archive.to_string_lossy().into_owned(),
             files,
+            root_files,
+            game_root,
             active: true,
         });
         self.deploy()
@@ -309,11 +376,22 @@ impl Manager {
     pub fn remove(&mut self, id: &str) -> R<()> {
         self.state.mods.retain(|m| m.id != id);
         self.deploy()?;
-        fs::remove_dir_all(self.virtual_dir(id)).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(err(e)) })
+        for dir in [self.virtual_dir(id), self.mods_dir.join("GameRootInstall").join(id)] {
+            match fs::remove_dir_all(dir) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(err(e)),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     pub fn set_active(&mut self, id: &str, active: bool) -> R<()> {
         self.state.mods.iter_mut().filter(|m| m.id == id).for_each(|m| m.active = active);
+        self.deploy()
+    }
+
+    pub fn set_game_root(&mut self, id: &str, on: bool) -> R<()> {
+        self.state.mods.iter_mut().filter(|m| m.id == id).for_each(|m| m.game_root = on);
         self.deploy()
     }
 
@@ -351,8 +429,8 @@ impl Manager {
     pub fn conflicts(&self) -> BTreeMap<String, Vec<String>> {
         let mut owners: BTreeMap<String, Vec<&str>> = BTreeMap::new();
         for m in self.state.mods.iter().filter(|m| m.active) {
-            for f in &m.files {
-                owners.entry(f.to_lowercase()).or_default().push(&m.id);
+            for (f, game_root) in m.deployable() {
+                owners.entry(key(f, game_root)).or_default().push(&m.id);
             }
         }
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -378,8 +456,8 @@ impl Manager {
     pub fn deploy(&mut self) -> R<()> {
         let mut desired: BTreeMap<String, Deployed> = BTreeMap::new();
         for m in self.state.mods.iter().filter(|m| m.active) {
-            for f in &m.files {
-                desired.insert(f.to_lowercase(), Deployed { path: f.clone(), mod_id: m.id.clone() });
+            for (f, game_root) in m.deployable() {
+                desired.insert(key(f, game_root), Deployed { path: f.clone(), mod_id: m.id.clone(), game_root });
             }
         }
         let deployed = &self.state.deployed;
@@ -413,11 +491,9 @@ impl Manager {
     }
 
     fn apply(&mut self, journal: &Journal) -> R<()> {
-        let root = self.install_root();
-        let backup = self.mods_dir.join("Backup");
         for (key, (old, new)) in journal {
             let Some(d) = old else { continue };
-            let target = root.join(&d.path);
+            let Place { target, saved, root, backup, .. } = self.place(d);
             match fs::remove_file(&target) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -425,7 +501,6 @@ impl Manager {
             }
             self.state.deployed.remove(key);
             crash_point();
-            let saved = backup.join(&d.path);
             if new.is_none() && saved.exists() {
                 move_file(&saved, &target)?;
                 crash_point();
@@ -436,15 +511,13 @@ impl Manager {
         }
         for (key, (_, new)) in journal {
             let Some(d) = new else { continue };
-            let target = root.join(&d.path);
-            let saved = backup.join(&d.path);
+            let Place { target, saved, src, .. } = self.place(d);
             if target.exists() && !saved.exists() {
                 move_file(&target, &saved)?;
                 crash_point();
             } else if target.exists() {
                 let _ = fs::remove_file(&target);
             }
-            let src = self.virtual_dir(&d.mod_id).join(&d.path);
             link_or_copy(&src, &target, self.game.needs_real_copy(&d.path))?;
             crash_point();
             self.state.deployed.insert(key.clone(), d.clone());
@@ -455,20 +528,17 @@ impl Manager {
     /// Rebuild `deployed` for journaled paths from what is actually on disk, and put back
     /// game files stranded in Backup. Converges any partial `apply`; the next deploy redoes the rest.
     fn reconcile(&mut self, journal: &Journal) -> R<()> {
-        let root = self.install_root();
-        let backup = self.mods_dir.join("Backup");
         for (key, (old, new)) in journal {
-            let live = [new, old]
-                .into_iter()
-                .flatten()
-                .find(|d| same_content(&self.virtual_dir(&d.mod_id).join(&d.path), &root.join(&d.path)));
+            let live = [new, old].into_iter().flatten().find(|d| {
+                let p = self.place(d);
+                same_content(&p.src, &p.target)
+            });
             if let Some(d) = live {
                 self.state.deployed.insert(key.clone(), d.clone());
                 continue;
             }
             self.state.deployed.remove(key);
-            let path = &new.as_ref().or(old.as_ref()).unwrap().path;
-            let (target, saved) = (root.join(path), backup.join(path));
+            let Place { target, saved, backup, .. } = self.place(new.as_ref().or(old.as_ref()).unwrap());
             if !saved.exists() {
                 continue;
             }
@@ -635,6 +705,69 @@ mod tests {
             }
             assert!(crashes > 0);
         }
+    }
+
+    #[test]
+    fn script_extender_deploys_to_game_root() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        fs::write(game_path.join("steam_api64.dll"), "vanilla").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
+
+        let skse = t.path().join("skse64.zip");
+        zip(&skse, &[
+            ("skse64_2_02_06/skse64_loader.exe", "exe"),
+            ("skse64_2_02_06/steam_api64.dll", "modded"),
+            ("skse64_2_02_06/readme.txt", "r"),
+            ("skse64_2_02_06/Data/Scripts/Test.pex", "pex"),
+        ]);
+        let s = m.stage(&skse).unwrap();
+        m.install(s, None).unwrap();
+        assert_eq!(fs::read_to_string(game_path.join("skse64_loader.exe")).unwrap(), "exe");
+        assert_eq!(fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(), "modded");
+        assert_eq!(fs::read_to_string(game_path.join("Data/Scripts/Test.pex")).unwrap(), "pex");
+        assert!(!game_path.join("Data/skse64_loader.exe").exists());
+
+        // Same name in Data from another mod is a different file, not a conflict.
+        let other = t.path().join("other.zip");
+        zip(&other, &[("Data/skse64_loader.exe", "data"), ("Data/Scripts/Test.pex", "other")]);
+        let s = m.stage(&other).unwrap();
+        m.install(s, None).unwrap();
+        assert_eq!(fs::read_to_string(game_path.join("skse64_loader.exe")).unwrap(), "exe");
+        assert_eq!(m.conflicts()["skse64"], vec!["other"]);
+
+        // No binary beside Data: toggle defaults off, files kept for flipping it on later.
+        let plain = t.path().join("plain.zip");
+        zip(&plain, &[("wrap/plain.txt", "r"), ("wrap/Data/meshes/a.nif", "n")]);
+        let s = m.stage(&plain).unwrap();
+        m.install(s, None).unwrap();
+        let p = m.state.mods.iter().find(|x| x.id == "plain").unwrap();
+        assert!(!p.game_root && p.root_files == ["plain.txt"]);
+        assert!(!game_path.join("plain.txt").exists());
+        m.set_game_root("plain", true).unwrap();
+        assert_eq!(fs::read_to_string(game_path.join("plain.txt")).unwrap(), "r");
+        m.set_game_root("plain", false).unwrap();
+        assert!(!game_path.join("plain.txt").exists());
+
+        // Toggling off withdraws root files and restores the displaced game file.
+        m.set_game_root("skse64", false).unwrap();
+        assert!(!game_path.join("skse64_loader.exe").exists());
+        assert_eq!(fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(), "vanilla");
+        assert_eq!(fs::read_to_string(game_path.join("Data/Scripts/Test.pex")).unwrap(), "other");
+        m.set_game_root("skse64", true).unwrap();
+
+        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        assert!(reopened.state.deployed.contains_key("/skse64_loader.exe"));
+
+        m.remove("skse64").unwrap();
+        assert!(!game_path.join("skse64_loader.exe").exists());
+        assert_eq!(fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(), "vanilla");
+        assert!(!m.mods_dir.join("GameRootInstall/skse64").exists());
+        assert!(!m.mods_dir.join("GameRootBackup/steam_api64.dll").exists());
     }
 
     #[test]

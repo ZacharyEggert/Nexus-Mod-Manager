@@ -201,6 +201,7 @@ async fn fomod_cancel(st: State<'_, App>, token: String) -> R<()> {
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Op {
     SetActive { id: String, active: bool },
+    SetGameRoot { id: String, on: bool },
     Remove { id: String },
     Reorder { id: String, delta: isize },
     SaveProfile { name: String },
@@ -215,6 +216,7 @@ async fn apply(app: AppHandle, st: State<'_, App>, mode: String, op: Op) -> R<()
     let mut m = manager(&app, &mode)?;
     match op {
         Op::SetActive { id, active } => m.set_active(&id, active),
+        Op::SetGameRoot { id, on } => m.set_game_root(&id, on),
         Op::Remove { id } => m.remove(&id),
         Op::Reorder { id, delta } => m.reorder(&id, delta),
         Op::SaveProfile { name } => m.save_profile(&name),

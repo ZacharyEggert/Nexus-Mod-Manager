@@ -81,6 +81,9 @@ pub struct ModInstallDef {
     #[serde(default)]
     pub real_file_required_extensions: Vec<String>,
     pub managed_installation_path: Option<String>,
+    /// Archive files beside the Data folder (script extender exe/dll) may deploy to the game root.
+    #[serde(default)]
+    pub supports_game_root_install: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +134,12 @@ impl GameDef {
             Some(suffix) => expand(suffix, game_path),
             None => game_path.to_path_buf(),
         }
+    }
+
+    /// Last component of the plugin dir (`Data`): the archive folder that maps onto the install root.
+    pub fn data_dir_name(&self) -> Option<&str> {
+        let s = self.plugin.as_ref()?.plugin_directory_suffix.as_deref()?;
+        s.rsplit(['\\', '/']).next()
     }
 
     pub fn plugins_file(&self, game_path: &Path) -> Option<PathBuf> {
@@ -186,5 +195,7 @@ mod tests {
         let sse = super::find("skyrimse").unwrap();
         assert!(sse.stop_folders.iter().any(|f| f == "SKSE"));
         assert_eq!(sse.active_marker(), "*");
+        assert!(sse.mod_install.supports_game_root_install);
+        assert_eq!(sse.data_dir_name(), Some("Data"));
     }
 }
