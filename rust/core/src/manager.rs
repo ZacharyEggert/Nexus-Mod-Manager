@@ -101,6 +101,9 @@ pub struct State {
     pub deployed: BTreeMap<String, Deployed>,
     /// Profile name -> active mod ids.
     pub profiles: BTreeMap<String, Vec<String>>,
+    /// Profile name -> plugin load order + active states when saved (games with plugins).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profile_plugins: BTreeMap<String, Vec<plugins::Plugin>>,
     /// Per-game setting: how mod files are placed in the game.
     #[serde(default)]
     pub link_mode: LinkMode,
@@ -872,9 +875,20 @@ impl Manager {
             .map(|m| m.id.clone())
             .collect();
         self.state.profiles.insert(name.into(), active);
+        match plugins::Policy::new(&self.game, &self.game_path) {
+            Some(policy) => self
+                .state
+                .profile_plugins
+                .insert(name.into(), policy.read()),
+            None => self.state.profile_plugins.remove(name),
+        };
         self.save()
     }
 
+    /// Switch active mods, then the saved plugin order and active states (C#
+    /// `ApplyPendingProfileLoadOrder`): saved plugins now missing are skipped, plugins the profile
+    /// doesn't list go inactive. A plugin state that would break the load order is refused and the
+    /// whole switch rolled back.
     pub fn load_profile(&mut self, name: &str) -> R<()> {
         let ids = self
             .state
@@ -882,14 +896,52 @@ impl Manager {
             .get(name)
             .cloned()
             .ok_or("no such profile")?;
+        let before: Vec<bool> = self.state.mods.iter().map(|m| m.active).collect();
+        let policy = plugins::Policy::new(&self.game, &self.game_path);
+        let order_before = policy.as_ref().map(|p| p.read());
         for m in &mut self.state.mods {
             m.active = ids.contains(&m.id);
         }
-        self.deploy()
+        self.deploy()?;
+        let Some(saved) = self.state.profile_plugins.get(name) else {
+            return Ok(());
+        };
+        let Err(e) = self.replace_plugins(saved) else {
+            return Ok(());
+        };
+        tracing::warn!(name, "profile plugin state refused, rolling back: {e}");
+        for (m, a) in self.state.mods.iter_mut().zip(before) {
+            m.active = a;
+        }
+        self.deploy()?;
+        if let Some(order) = order_before {
+            // ponytail: best effort; it was the live state a moment ago.
+            if let Err(e) = self.replace_plugins(&order) {
+                tracing::warn!("restoring the previous plugin order failed: {e}");
+            }
+        }
+        Err(format!("Profile \"{name}\" not loaded: {e}").into())
+    }
+
+    /// `set_plugins` with `saved` as the whole state: unlisted plugins go inactive.
+    fn replace_plugins(&self, saved: &[plugins::Plugin]) -> R<Vec<PluginRow>> {
+        let mut wanted = saved.to_vec();
+        if let Some(policy) = plugins::Policy::new(&self.game, &self.game_path) {
+            for c in policy.read() {
+                if !saved.iter().any(|s| s.name.eq_ignore_ascii_case(&c.name)) {
+                    wanted.push(plugins::Plugin {
+                        name: c.name,
+                        active: false,
+                    });
+                }
+            }
+        }
+        self.set_plugins(&wanted)
     }
 
     pub fn delete_profile(&mut self, name: &str) -> R<()> {
         self.state.profiles.remove(name);
+        self.state.profile_plugins.remove(name);
         self.save()
     }
 
@@ -1779,6 +1831,97 @@ mod tests {
         );
         // Activating a plugin whose master is off is refused.
         assert!(m.set_plugins(&[pl("Dep.esp", true)]).is_err());
+    }
+
+    #[test]
+    fn profiles_keep_plugin_order_and_active_state() {
+        use crate::plugins::{tests::tes4, Plugin};
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        let txt = t.path().join("plugins.txt");
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let mut m = Manager::open(game, game_path, t.path().join("mods")).unwrap();
+        let add = |m: &mut Manager, name: &str, files: &[(&str, Vec<u8>)]| {
+            let a = t.path().join(format!("{name}.zip"));
+            let mut z = zip::ZipWriter::new(fs::File::create(&a).unwrap());
+            for (n, body) in files {
+                z.start_file(*n, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                z.write_all(body).unwrap();
+            }
+            z.finish().unwrap();
+            let s = m.stage(&a).unwrap();
+            m.install(s, None).unwrap();
+        };
+        add(&mut m, "ModA", &[("A.esp", tes4(0, &[], ""))]);
+        add(&mut m, "ModB", &[("B.esp", tes4(0, &[], ""))]);
+        add(&mut m, "Lib", &[("Lib.esm", tes4(1, &[], ""))]);
+        add(&mut m, "Dep", &[("Dep.esp", tes4(0, &["Lib.esm"], ""))]);
+        let pl = |n: &str, active: bool| Plugin {
+            name: n.into(),
+            active,
+        };
+        let body = || {
+            fs::read_to_string(&txt)
+                .unwrap()
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        m.set_plugins(&[
+            pl("Lib.esm", true),
+            pl("B.esp", true),
+            pl("A.esp", false),
+            pl("Dep.esp", true),
+        ])
+        .unwrap();
+        m.save_profile("one").unwrap();
+        m.set_plugins(&[pl("A.esp", true), pl("B.esp", true), pl("Dep.esp", false)])
+            .unwrap();
+        m.set_active("ModB", false).unwrap();
+        m.save_profile("two").unwrap();
+        assert_eq!(body(), "*Lib.esm *A.esp Dep.esp");
+
+        m.load_profile("one").unwrap();
+        assert_eq!(body(), "*Lib.esm *B.esp A.esp *Dep.esp");
+        m.load_profile("two").unwrap();
+        assert_eq!(body(), "*Lib.esm *A.esp Dep.esp");
+        // Saved state survives a reopen.
+        let m2 = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        assert_eq!(m2.state.profile_plugins["one"].len(), 4);
+
+        // A plugin gone since the save is skipped.
+        m.remove("ModA").unwrap();
+        m.load_profile("one").unwrap();
+        assert_eq!(body(), "*Lib.esm *B.esp *Dep.esp");
+
+        // A profile saved before plugins were kept only switches mods.
+        m.state.profiles.insert("old".into(), vec!["ModB".into()]);
+        m.load_profile("old").unwrap();
+        assert_eq!(body(), "*B.esp");
+
+        // Order that would break the load order (Dep active, its master gone) is refused and
+        // the switch rolled back.
+        m.load_profile("one").unwrap();
+        m.remove("Lib").unwrap();
+        m.set_active("Dep", false).unwrap();
+        let before = (
+            body(),
+            m.state.mods.iter().map(|x| x.active).collect::<Vec<_>>(),
+        );
+        let err = m.load_profile("one").unwrap_err().to_string();
+        assert!(err.contains("Dep.esp"), "{err}");
+        assert_eq!(
+            before,
+            (body(), m.state.mods.iter().map(|x| x.active).collect())
+        );
+
+        m.delete_profile("one").unwrap();
+        assert!(!m.state.profile_plugins.contains_key("one"));
     }
 
     #[test]
