@@ -102,7 +102,29 @@
     run(`Launching ${cur.name}`, () => api.launch(cur.mode_id)).catch(() => {});
   }
 
-  loadGames();
+  /** Route Nexus links to a configured game they belong to (the open one if it matches). */
+  async function handleLinks() {
+    for (const { link, modes } of await api.takeLinks()) {
+      await loadGames();
+      const ready = modes.filter((m) => games.find((g) => g.mode_id === m)?.game_path);
+      const mode = ready.find((m) => m === curMode) ?? ready[0];
+      if (!mode) {
+        const names = modes.map((m) => games.find((g) => g.mode_id === m)?.name ?? m);
+        status(names.length ? `Set up ${names.join(' or ')} to use this Nexus link` : `No supported game for Nexus "${link.domain}"`, true);
+        continue;
+      }
+      if (mode !== curMode) await select(mode);
+      onNexusLink(link, mode);
+    }
+  }
+
+  // ponytail: #15 (download manager) replaces this with a queued download.
+  function onNexusLink(link: api.NexusLink, mode: string) {
+    status(`Nexus link for ${games.find((g) => g.mode_id === mode)?.name}: mod ${link.mod_id}${link.file_id ? `, file ${link.file_id}` : ''}`);
+  }
+
+  loadGames().then(handleLinks);
+  api.onLinks(handleLinks);
   getCurrentWebview().onDragDropEvent(async (e) => {
     if (e.payload.type !== 'drop') return;
     for (const p of e.payload.paths) await install(p);

@@ -76,6 +76,26 @@ export interface Account {
   error: string | null;
 }
 
+export interface NxmKey {
+  key: string;
+  expires: number;
+}
+
+export interface NexusLink {
+  domain: string;
+  mod_id: number;
+  file_id: number | null;
+  key: NxmKey | null;
+  user_id: number | null;
+  source: string;
+}
+
+export interface LinkEvent {
+  link: NexusLink;
+  /** Game modes the link's domain belongs to. */
+  modes: string[];
+}
+
 export type GroupKind = 'SelectAtLeastOne' | 'SelectAtMostOne' | 'SelectExactlyOne' | 'SelectAll' | 'SelectAny';
 export type PluginType = 'Required' | 'Optional' | 'Recommended' | 'NotUsable' | 'CouldBeUsable';
 
@@ -139,6 +159,7 @@ export const saveSettings = (settings: Settings) => invoke<void>('save_settings'
 export const nexusAccount = () => invoke<Account>('nexus_account');
 export const nexusSetKey = (key: string) => invoke<NexusUser>('nexus_set_key', { key });
 export const nexusLogout = () => invoke<void>('nexus_logout');
+export const takeLinks = () => invoke<LinkEvent[]>('take_links');
 
 // ---------- background tasks ----------
 
@@ -202,6 +223,9 @@ export function start<T>(c: TaskCall<T>, onProgress: (p: Progress) => void): { i
 }
 
 export const cancel = (id: string) => invoke<void>('cancel', { id });
+
+/** Fired when Nexus links arrive; fetch them with `takeLinks`. */
+export const onLinks = (fn: () => void) => listen('nxm', fn);
 
 /** Fired when a quit is waiting for running tasks to roll back. */
 export const onQuitting = (fn: () => void) => listen('quitting', fn);

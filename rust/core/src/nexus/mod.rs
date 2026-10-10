@@ -2,6 +2,7 @@
 //! lacks (download links, key validation, updated-mods list, categories) always go to v1.
 
 mod graphql;
+pub mod link;
 mod rest;
 pub mod sso;
 

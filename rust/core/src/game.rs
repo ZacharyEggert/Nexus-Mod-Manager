@@ -208,14 +208,9 @@ impl GameDef {
         has_ext(file, &self.mod_install.real_file_required_extensions)
     }
 
-    /// Nexus Mods game domain (`skyrimspecialedition`), per C# `GameDomainTranslator`.
+    /// Nexus Mods game domain (`skyrimspecialedition`).
     pub fn nexus_domain(&self) -> String {
-        match self.mode_id.to_ascii_lowercase().as_str() {
-            "skyrimse" | "skyrimgog" | "skyrimvr" => "skyrimspecialedition".into(),
-            "falloutnv" => "newvegas".into(),
-            "fallout4vr" => "fallout4".into(),
-            m => m.into(),
-        }
+        nexus_domain(&self.mode_id)
     }
 
     pub fn default_executable(&self) -> Option<&str> {
@@ -240,6 +235,26 @@ impl GameDef {
     }
 }
 
+/// Canonical Nexus domain for a mode id or legacy domain, per C# `GameDomainTranslator`.
+pub fn nexus_domain(name: &str) -> String {
+    match name.to_ascii_lowercase().as_str() {
+        "skyrimse" | "skyrimgog" | "skyrimvr" => "skyrimspecialedition".into(),
+        "falloutnv" => "newvegas".into(),
+        "fallout4vr" => "fallout4".into(),
+        m => m.into(),
+    }
+}
+
+/// Game modes a Nexus link's domain belongs to (SkyrimSE + SkyrimGOG share one).
+pub fn modes_for_domain(domain: &str) -> Vec<String> {
+    let d = nexus_domain(domain);
+    all()
+        .into_iter()
+        .filter(|g| g.nexus_domain() == d)
+        .map(|g| g.mode_id)
+        .collect()
+}
+
 pub(crate) fn has_ext(file: &str, exts: &[String]) -> bool {
     let lower = file.to_ascii_lowercase();
     exts.iter()
@@ -259,6 +274,12 @@ mod tests {
         assert_eq!(sse.data_dir_name(), Some("Data"));
         assert_eq!(sse.nexus_domain(), "skyrimspecialedition");
         assert_eq!(super::find("FalloutNV").unwrap().nexus_domain(), "newvegas");
+        assert_eq!(
+            super::modes_for_domain("skyrimse"),
+            ["SkyrimGOG", "SkyrimSE"]
+        );
+        assert_eq!(super::modes_for_domain("NewVegas"), ["FalloutNV"]);
+        assert!(super::modes_for_domain("morrowind").is_empty());
     }
 
     #[cfg(not(windows))]

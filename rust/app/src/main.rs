@@ -59,6 +59,47 @@ struct App {
     nexus: Mutex<Option<Arc<nexus::Client>>>,
     /// Account the stored key belongs to, once validated.
     user: Mutex<Option<User>>,
+    /// Nexus links received, until the UI takes them.
+    links: Mutex<Vec<LinkEvent>>,
+    /// Recent link texts and when they arrived; a link delivered twice (argv + OS event) counts once.
+    recent_links: Mutex<Vec<(String, Instant)>>,
+}
+
+#[derive(Clone, Serialize)]
+struct LinkEvent {
+    link: nexus::link::Link,
+    /// Game modes the link's domain belongs to; the UI picks a configured one.
+    modes: Vec<String>,
+}
+
+/// Queue `text` if it's a Nexus link and tell the UI.
+fn receive_link(app: &AppHandle, text: &str) {
+    let Some(link) = nexus::link::parse(text) else {
+        return;
+    };
+    let st = app.state::<App>();
+    {
+        let mut recent = st.recent_links.lock().unwrap();
+        recent.retain(|(_, t)| t.elapsed() < Duration::from_secs(5));
+        if recent.iter().any(|(s, _)| s == text) {
+            return;
+        }
+        recent.push((text.into(), Instant::now()));
+    }
+    tracing::info!(domain = %link.domain, mod_id = link.mod_id, file_id = ?link.file_id, "Nexus link received");
+    let modes = game::modes_for_domain(&link.domain);
+    st.links.lock().unwrap().push(LinkEvent { link, modes });
+    let _ = app.emit("nxm", ());
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// Links received so far (each returned once).
+#[tauri::command]
+fn take_links(st: State<'_, App>) -> Vec<LinkEvent> {
+    std::mem::take(&mut *st.links.lock().unwrap())
 }
 
 impl App {
@@ -768,6 +809,15 @@ fn main() {
     // Closing/quitting mid-task cancels it and waits for the rollback, so the game is never left
     // half-modded (a hard kill is covered by Manager::open's recovery instead).
     tauri::Builder::default()
+        // First: a second launch (e.g. the browser opening an nxm:// link) hands its args here and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            argv.iter().skip(1).for_each(|a| receive_link(app, a));
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .on_window_event(|w, e| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = e {
                 if w.state::<App>().hold_quit(w.app_handle()) {
@@ -779,6 +829,20 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             init_logging(app.handle());
+            use tauri_plugin_deep_link::DeepLinkExt;
+            // Bundles register nxm:// at install; Windows/Linux dev builds register at runtime.
+            #[cfg(any(windows, target_os = "linux"))]
+            if let Err(e) = app.deep_link().register_all() {
+                tracing::error!("registering nxm:// handler: {e}");
+            }
+            let h = app.handle().clone();
+            // macOS delivers links as OS events, at startup too.
+            app.deep_link()
+                .on_open_url(move |e| e.urls().iter().for_each(|u| receive_link(&h, u.as_str())));
+            // Windows/Linux pass the link as the only argument.
+            std::env::args()
+                .skip(1)
+                .for_each(|a| receive_link(app.handle(), &a));
             Ok(())
         })
         .manage(App::default())
@@ -803,7 +867,8 @@ fn main() {
             nexus_account,
             nexus_set_key,
             nexus_login,
-            nexus_logout
+            nexus_logout,
+            take_links
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
