@@ -11,7 +11,8 @@ aside button:hover { background:var(--bg); }
 aside button.sel { background:var(--accent); color:#fff; }
 aside small { display:block; color:var(--muted); font-size:11px; }
 aside button.sel small { color:#dde8f5; }
-aside button.foot { position:sticky; bottom:0; border-top:1px solid var(--line); color:var(--muted); background:var(--panel); }
+aside .foot { position:sticky; bottom:0; border-top:1px solid var(--line); background:var(--panel); }
+aside .foot button:not(.sel) { color:var(--muted); }
 main { display:flex; flex-direction:column; min-width:0; }
 .bar { display:flex; gap:8px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
 .bar .grow { flex:1; }
@@ -50,3 +51,5 @@ dialog::backdrop { background:#0007; }
 .wiz .info img { max-width:100%; border-radius:6px; display:block; margin-bottom:8px; }
 .wiz footer { grid-column:1/-1; display:flex; gap:8px; justify-content:flex-end; padding:10px 16px; border-top:1px solid var(--line); }
 button:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+table.downloads td { vertical-align:top; }
+table.downloads td.actions { white-space:nowrap; text-align:right; }

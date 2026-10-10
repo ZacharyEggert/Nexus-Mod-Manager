@@ -1,6 +1,7 @@
 pub mod adjust;
 pub mod archive;
 pub mod discover;
+pub mod download;
 pub mod fomod;
 pub mod game;
 pub mod manager;

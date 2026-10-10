@@ -193,6 +193,21 @@ impl Client {
         }
     }
 
+    /// The file a mod-page link means: newest MAIN file, else newest of any (C# `GetDefaultFileInfo`).
+    pub fn default_file(&self, domain: &str, mod_id: u64) -> Result<FileInfo> {
+        let files = self.files(domain, mod_id)?;
+        let newest = |main: bool| {
+            files
+                .iter()
+                .filter(|f| !main || f.category == "MAIN")
+                .max_by_key(|f| (f.uploaded, f.file_id))
+                .cloned()
+        };
+        newest(true)
+            .or_else(|| newest(false))
+            .ok_or_else(|| not_found("file"))
+    }
+
     /// Newest file in `file_id`'s update chain (itself when nothing replaced it).
     pub fn latest(&self, domain: &str, mod_id: u64, file_id: u64) -> Result<FileInfo> {
         match self.api {
@@ -381,6 +396,8 @@ pub(crate) mod fake {
         pub status: u16,
         pub headers: Vec<(&'static str, String)>,
         pub body: Vec<u8>,
+        /// Dribble the body out in 4 KiB chunks, 10 ms apart.
+        pub slow: bool,
     }
 
     pub fn json(status: u16, body: &str) -> Resp {
@@ -388,6 +405,7 @@ pub(crate) mod fake {
             status,
             headers: vec![("content-type", "application/json".into())],
             body: body.as_bytes().to_vec(),
+            slow: false,
         }
     }
 
@@ -443,7 +461,18 @@ pub(crate) mod fake {
                 }
                 out += &format!("content-length: {}\r\n\r\n", resp.body.len());
                 let _ = s.write_all(out.as_bytes());
-                let _ = s.write_all(&resp.body);
+                if resp.slow {
+                    std::thread::spawn(move || {
+                        for c in resp.body.chunks(4096) {
+                            if s.write_all(c).is_err() {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                    });
+                } else {
+                    let _ = s.write_all(&resp.body);
+                }
             }
         });
         (base, log)

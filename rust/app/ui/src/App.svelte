@@ -3,11 +3,12 @@
   import * as api from './lib/api';
   import { cancelTask, run, runTask, status, ui } from './lib/ui.svelte';
   import AppSettings from './AppSettings.svelte';
+  import Downloads from './Downloads.svelte';
   import Library from './Library.svelte';
   import Setup from './Setup.svelte';
   import Wizard from './Wizard.svelte';
 
-  type View = { kind: 'none' } | { kind: 'settings' } | { kind: 'game'; mode: string; setup: boolean };
+  type View = { kind: 'none' } | { kind: 'settings' } | { kind: 'downloads' } | { kind: 'game'; mode: string; setup: boolean };
 
   let games = $state<api.GameInfo[]>([]);
   let view = $state<View>({ kind: 'none' });
@@ -113,14 +114,20 @@
         status(names.length ? `Set up ${names.join(' or ')} to use this Nexus link` : `No supported game for Nexus "${link.domain}"`, true);
         continue;
       }
-      if (mode !== curMode) await select(mode);
       onNexusLink(link, mode);
     }
   }
 
-  // ponytail: #15 (download manager) replaces this with a queued download.
-  function onNexusLink(link: api.NexusLink, mode: string) {
-    status(`Nexus link for ${games.find((g) => g.mode_id === mode)?.name}: mod ${link.mod_id}${link.file_id ? `, file ${link.file_id}` : ''}`);
+  async function onNexusLink(link: api.NexusLink, mode: string) {
+    view = { kind: 'downloads' };
+    lib = null;
+    await run(`Adding download (mod ${link.mod_id})`, () => api.downloadAdd(mode, link.source)).catch(() => {});
+  }
+
+  /** Install a finished download into its game. */
+  async function installDownload(d: api.Download) {
+    await select(d.mode);
+    if (view.kind === 'game' && !view.setup) install(d.path);
   }
 
   loadGames().then(handleLinks);
@@ -140,12 +147,15 @@
       </button>
     {/each}
   </nav>
-  <button class="foot" class:sel={view.kind === 'settings'} onclick={() => { view = { kind: 'settings' }; lib = null; }}>App settings</button>
+  <div class="foot">
+  <button class:sel={view.kind === 'downloads'} onclick={() => { view = { kind: 'downloads' }; lib = null; }}>Downloads</button>
+  <button class:sel={view.kind === 'settings'} onclick={() => { view = { kind: 'settings' }; lib = null; }}>App settings</button>
+  </div>
 </aside>
 
 <main>
   <div class="bar">
-    <strong>{view.kind === 'settings' ? 'App settings' : (cur?.name ?? 'Select a game')}</strong>
+    <strong>{view.kind === 'settings' ? 'App settings' : view.kind === 'downloads' ? 'Downloads' : (cur?.name ?? 'Select a game')}</strong>
     <span class="grow"></span>
     {#if view.kind === 'game' && cur?.game_path}
       <button class="btn primary" onclick={pickAndInstall}>Install mod…</button>
@@ -165,6 +175,8 @@
   <div id="content">
     {#if view.kind === 'settings'}
       <AppSettings />
+    {:else if view.kind === 'downloads'}
+      <Downloads {games} oninstall={installDownload} />
     {:else if view.kind === 'game' && cur}
       {#if view.setup}
         {#key cur.mode_id}<Setup game={cur} onsaved={() => select(cur.mode_id)} />{/key}

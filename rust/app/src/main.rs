@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use nmm_core::download::{self, Download, Downloads};
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
 use nmm_core::manager::{LinkMode, Manager, ModEntry, Staged};
 use nmm_core::nexus::{self, sso, User};
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager as _, State};
 use tauri_plugin_dialog::DialogExt;
@@ -23,7 +24,7 @@ struct Config {
     games: BTreeMap<String, GameConfig>,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Settings {
     /// Where newly set-up games keep their mods (`<root>/<game>`); `None` = app data dir.
@@ -33,6 +34,20 @@ struct Settings {
     nexus_api: nmm_core::nexus::Api,
     /// Quit after launching a game.
     close_on_launch: bool,
+    /// Downloads running at once.
+    max_downloads: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            mods_root: None,
+            link_mode: LinkMode::default(),
+            nexus_api: nexus::Api::default(),
+            close_on_launch: false,
+            max_downloads: 3,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -61,6 +76,8 @@ struct App {
     user: Mutex<Option<User>>,
     /// Nexus links received, until the UI takes them.
     links: Mutex<Vec<LinkEvent>>,
+    /// Download queue, opened in setup.
+    downloads: OnceLock<Downloads>,
     /// Recent link texts and when they arrived; a link delivered twice (argv + OS event) counts once.
     recent_links: Mutex<Vec<(String, Instant)>>,
 }
@@ -390,7 +407,11 @@ async fn settings(app: AppHandle) -> SettingsView {
 
 #[tauri::command]
 async fn save_settings(app: AppHandle, settings: Settings) -> R<()> {
+    let max = settings.max_downloads;
     update_config(&app, |c| c.settings = settings)?;
+    if let Some(d) = app.state::<App>().downloads.get() {
+        d.set_max(max);
+    }
     // API mode may have changed.
     blocking(move || {
         app.state::<App>().nexus.lock().unwrap().take();
@@ -773,6 +794,110 @@ async fn launch(app: AppHandle, mode: String) -> R<()> {
     Ok(())
 }
 
+// ---------- downloads ----------
+
+fn downloads_of(app: &AppHandle) -> R<Downloads> {
+    Ok(app
+        .state::<App>()
+        .downloads
+        .get()
+        .ok_or("download queue unavailable; see the log")?
+        .clone())
+}
+
+/// Open the queue in `<app data>/Downloads`; links and md5 checks go through the Nexus client.
+fn open_downloads(app: &AppHandle) -> R<Downloads> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("Downloads");
+    let (a, b, c) = (app.clone(), app.clone(), app.clone());
+    let hooks = download::Hooks {
+        links: Box::new(move |d| {
+            let links =
+                nexus_client(&a)?.download_links(&d.domain, d.mod_id, d.file_id, d.key.as_ref())?;
+            Ok(links.into_iter().map(|l| l.url).collect())
+        }),
+        verify: Box::new(move |d, md5| {
+            let hits = nexus_client(&b)?.by_md5(&d.domain, md5)?;
+            Ok(hits
+                .iter()
+                .any(|h| h.mod_id == d.mod_id && h.file.file_id == d.file_id))
+        }),
+        changed: Box::new(move |d| {
+            let _ = c.emit("download", d);
+        }),
+    };
+    Downloads::open(&dir, load_config(app).settings.max_downloads, hooks)
+}
+
+#[tauri::command]
+async fn downloads(app: AppHandle) -> R<Vec<Download>> {
+    Ok(downloads_of(&app)?.list())
+}
+
+/// Queue a Nexus link (nxm:// or mod page; a page means its main file) for `mode`. Returns the id.
+#[tauri::command]
+async fn download_add(app: AppHandle, mode: String, url: String) -> R<String> {
+    blocking(move || {
+        let link = nexus::link::parse(&url).ok_or("not a Nexus mod link")?;
+        let dl = downloads_of(&app)?;
+        let c = nexus_client(&app)?;
+        let file = match link.file_id {
+            Some(f) => c.file(&link.domain, link.mod_id, f)?,
+            None => c.default_file(&link.domain, link.mod_id)?,
+        };
+        let m = c.mod_info(&link.domain, link.mod_id)?;
+        let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let name = if file.file_name.is_empty() {
+            &file.name
+        } else {
+            &file.file_name
+        };
+        let id = dl.add(Download {
+            id: String::new(),
+            path: dir
+                .join("Downloads")
+                .join(&mode)
+                .join(download::safe_file_name(name)),
+            mode,
+            domain: link.domain,
+            mod_id: link.mod_id,
+            file_id: file.file_id,
+            mod_name: m.name,
+            name: file.name,
+            version: file.version,
+            size: file.size,
+            key: link.key,
+            state: download::State::Queued,
+            done: 0,
+            error: None,
+            verified: None,
+        });
+        Ok(id)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn download_pause(app: AppHandle, id: String) -> R<()> {
+    downloads_of(&app)?.pause(&id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn download_resume(app: AppHandle, id: String) -> R<()> {
+    downloads_of(&app)?.resume(&id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn download_remove(app: AppHandle, id: String, delete_file: bool) -> R<()> {
+    downloads_of(&app)?.remove(&id, delete_file);
+    Ok(())
+}
+
 /// Daily log files in the app log dir (7 kept), plus stderr; panics are logged too.
 fn init_logging(app: &AppHandle) {
     use tracing_subscriber::fmt::writer::MakeWriterExt;
@@ -839,6 +964,12 @@ fn main() {
             // macOS delivers links as OS events, at startup too.
             app.deep_link()
                 .on_open_url(move |e| e.urls().iter().for_each(|u| receive_link(&h, u.as_str())));
+            match open_downloads(app.handle()) {
+                Ok(d) => {
+                    let _ = app.state::<App>().downloads.set(d);
+                }
+                Err(e) => tracing::error!("download queue: {e}"),
+            }
             // Windows/Linux pass the link as the only argument.
             std::env::args()
                 .skip(1)
@@ -868,7 +999,12 @@ fn main() {
             nexus_set_key,
             nexus_login,
             nexus_logout,
-            take_links
+            take_links,
+            downloads,
+            download_add,
+            download_pause,
+            download_resume,
+            download_remove
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -894,6 +1030,7 @@ mod tests {
         assert_eq!(cfg.games["Fallout4"].mods_dir, PathBuf::from("/m"));
         assert!(cfg.settings.mods_root.is_none() && !cfg.settings.close_on_launch);
         assert_eq!(cfg.settings.link_mode, LinkMode::Auto);
+        assert_eq!(cfg.settings.max_downloads, 3);
         let back: Config = serde_json::from_slice(&serde_json::to_vec(&cfg).unwrap()).unwrap();
         assert_eq!(back.settings.nexus_api, nmm_core::nexus::Api::Graphql);
     }

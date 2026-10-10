@@ -55,6 +55,7 @@ export interface Settings {
   link_mode: LinkMode;
   nexus_api: NexusApi;
   close_on_launch: boolean;
+  max_downloads: number;
 }
 
 export interface SettingsView extends Settings {
@@ -94,6 +95,29 @@ export interface LinkEvent {
   link: NexusLink;
   /** Game modes the link's domain belongs to. */
   modes: string[];
+}
+
+export type DownloadState = 'queued' | 'running' | 'paused' | 'done' | 'failed';
+
+export interface Download {
+  id: string;
+  mode: string;
+  domain: string;
+  mod_id: number;
+  file_id: number;
+  mod_name: string;
+  name: string;
+  version: string;
+  path: string;
+  /** Bytes; 0 = unknown. */
+  size: number;
+  key: NxmKey | null;
+  state: DownloadState;
+  done: number;
+  /** Failure reason, or a retry note while running. */
+  error: string | null;
+  /** md5 matched Nexus; null = couldn't check. */
+  verified: boolean | null;
 }
 
 export type GroupKind = 'SelectAtLeastOne' | 'SelectAtMostOne' | 'SelectExactlyOne' | 'SelectAll' | 'SelectAny';
@@ -160,6 +184,13 @@ export const nexusAccount = () => invoke<Account>('nexus_account');
 export const nexusSetKey = (key: string) => invoke<NexusUser>('nexus_set_key', { key });
 export const nexusLogout = () => invoke<void>('nexus_logout');
 export const takeLinks = () => invoke<LinkEvent[]>('take_links');
+export const downloads = () => invoke<Download[]>('downloads');
+export const downloadAdd = (mode: string, url: string) => invoke<string>('download_add', { mode, url });
+export const downloadPause = (id: string) => invoke<void>('download_pause', { id });
+export const downloadResume = (id: string) => invoke<void>('download_resume', { id });
+export const downloadRemove = (id: string, deleteFile: boolean) => invoke<void>('download_remove', { id, deleteFile });
+/** A download changed state or made progress. */
+export const onDownload = (fn: (d: Download) => void) => listen<Download>('download', (e) => fn(e.payload));
 
 // ---------- background tasks ----------
 

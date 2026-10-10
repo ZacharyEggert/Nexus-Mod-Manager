@@ -56,6 +56,8 @@
       <option value="graphql">GraphQL (v2)</option>
       <option value="rest">REST (v1)</option>
     </select>
+    <label for="md">Downloads at once</label>
+    <input id="md" type="number" min="1" max="10" bind:value={s.max_downloads} />
     <p><label class="sub"><input type="checkbox" bind:checked={s.close_on_launch} /> Close Nexus Mod Manager after launching a game</label></p>
     <p><button class="btn primary" onclick={save}>Save</button></p>
     <strong>Nexus account</strong>
