@@ -169,6 +169,11 @@ impl GameDef {
         has_ext(file, &self.plugin_extensions)
     }
 
+    /// Files the game won't read through a symlink; symlink mode hardlinks these instead.
+    pub fn needs_hardlink(&self, file: &str) -> bool {
+        has_ext(file, &self.mod_install.hardlink_required_extensions)
+    }
+
     pub fn needs_real_copy(&self, file: &str) -> bool {
         has_ext(file, &self.mod_install.real_file_required_extensions)
     }

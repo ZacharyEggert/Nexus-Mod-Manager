@@ -70,6 +70,13 @@ function renderSetup() {
 
 // ---------- library ----------
 
+const LINK_MODES = [
+  ['auto', 'hardlink, or copy if not possible'],
+  ['hardlink', 'hardlink only'],
+  ['symlink', 'symlink'],
+  ['copy', 'copying'],
+];
+
 async function op(label, o) {
   await run(label, () => invoke('apply', { mode: cur.mode_id, op: o }));
   renderLibrary();
@@ -111,7 +118,15 @@ async function renderLibrary() {
         h('button', { textContent: '✕', title: 'Uninstall', ariaLabel: `Uninstall ${m.name}`, onclick: () => op(`Removing ${m.name}`, { op: 'remove', id: m.id }) })));
   });
   $('#content').replaceChildren(
-    h('p', { className: 'muted', textContent: `Deploying to ${lib.install_root}. Lower in the list wins file conflicts.` }),
+    h('p', { className: 'muted' }, `Deploying to ${lib.install_root} by `,
+      h('select', { ariaLabel: 'How mod files are placed in the game', onchange: (e) => op('Relinking mod files', { op: 'set_link_mode', mode: e.target.value }) },
+        LINK_MODES.map(([v, t]) => h('option', { value: v, textContent: t, selected: v === lib.link_mode }))),
+      '. Lower in the list wins file conflicts.'),
+    !lib.same_volume && lib.link_mode !== 'copy' && h('p', { className: 'conf', textContent: lib.link_mode === 'hardlink'
+      ? 'The mods folder is on a different drive than the game, so hardlinks can’t be made. Pick another mode or move the mods folder in Settings.'
+      : lib.link_mode === 'symlink'
+        ? 'The mods folder is on a different drive than the game. Symlinks work, but break if that drive is disconnected.'
+        : 'The mods folder is on a different drive than the game, so mod files are copied (uses extra space). Symlinks avoid the copy; moving the mods folder to the game’s drive avoids both.' }),
     lib.mods.length
       ? h('table', {}, h('thead', {}, h('tr', {}, h('th', { textContent: '#' }), h('th', { textContent: 'On' }), h('th', { textContent: 'Mod' }), h('th', { textContent: 'Files' }), h('th'))), h('tbody', {}, rows))
       : h('p', { textContent: 'No mods installed yet.' }),

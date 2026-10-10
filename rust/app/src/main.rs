@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
-use nmm_core::manager::{Manager, ModEntry, Staged};
+use nmm_core::manager::{LinkMode, Manager, ModEntry, Staged};
 use nmm_core::{discover, game};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -103,6 +103,8 @@ struct Library {
     conflicts: BTreeMap<String, Vec<String>>,
     profiles: Vec<String>,
     install_root: PathBuf,
+    link_mode: LinkMode,
+    same_volume: bool,
 }
 
 #[tauri::command]
@@ -111,6 +113,8 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
     Ok(Library {
         conflicts: m.conflicts(),
         install_root: m.install_root(),
+        link_mode: m.state.link_mode,
+        same_volume: m.same_volume(),
         profiles: m.state.profiles.keys().cloned().collect(),
         mods: m.state.mods,
     })
@@ -202,6 +206,7 @@ async fn fomod_cancel(st: State<'_, App>, token: String) -> R<()> {
 enum Op {
     SetActive { id: String, active: bool },
     SetGameRoot { id: String, on: bool },
+    SetLinkMode { mode: LinkMode },
     Remove { id: String },
     Reorder { id: String, delta: isize },
     SaveProfile { name: String },
@@ -217,6 +222,7 @@ async fn apply(app: AppHandle, st: State<'_, App>, mode: String, op: Op) -> R<()
     match op {
         Op::SetActive { id, active } => m.set_active(&id, active),
         Op::SetGameRoot { id, on } => m.set_game_root(&id, on),
+        Op::SetLinkMode { mode } => m.set_link_mode(mode),
         Op::Remove { id } => m.remove(&id),
         Op::Reorder { id, delta } => m.reorder(&id, delta),
         Op::SaveProfile { name } => m.save_profile(&name),

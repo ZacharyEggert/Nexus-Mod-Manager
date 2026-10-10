@@ -85,6 +85,29 @@ pub struct State {
     pub deployed: BTreeMap<String, Deployed>,
     /// Profile name -> active mod ids.
     pub profiles: BTreeMap<String, Vec<String>>,
+    /// Per-game setting: how mod files are placed in the game.
+    #[serde(default)]
+    pub link_mode: LinkMode,
+    /// Mode the current links were made with; a mismatch relinks everything on the next deploy.
+    #[serde(default)]
+    pub deployed_mode: LinkMode,
+}
+
+/// How deploy places a mod file in the game. Every mode falls back to a copy when its link
+/// can't be made (other volume, filesystem without links, Windows without developer mode).
+/// Files a game needs as real files (`realFileRequiredExtensions`) are always copied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkMode {
+    /// Hardlink, else copy.
+    #[default]
+    Auto,
+    /// Hardlink only; refuses rather than copying, so a full disk can't fill up silently.
+    Hardlink,
+    /// Symlink (hardlink for `hardlinkRequiredExtensions`), else copy. No disk cost across volumes.
+    Symlink,
+    /// Always copy: survives the mods folder moving or being deleted.
+    Copy,
 }
 
 /// Extracted archive waiting to be installed.
@@ -171,13 +194,35 @@ fn game_root_files(dir: &Path, prefix: &Path, game: &GameDef) -> (Vec<(PathBuf, 
     (files, binary)
 }
 
-fn link_or_copy(src: &Path, dst: &Path, real_copy: bool) -> R<()> {
+fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(src, dst);
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_file(src, dst);
+}
+
+/// Place `src` at `dst` per `mode`; see `LinkMode`. `real_copy` / `need_hard` come from the game def.
+fn place_file(src: &Path, dst: &Path, mode: LinkMode, real_copy: bool, need_hard: bool) -> R<()> {
     if let Some(p) = dst.parent() {
         fs::create_dir_all(p).map_err(err)?;
     }
-    // ponytail: hardlink -> copy; no symlink tier (Windows needs dev mode for it).
-    if real_copy || fs::hard_link(src, dst).is_err() {
-        fs::copy(src, dst).map_err(|e| format!("deploy {} -> {}: {e}", src.display(), dst.display()))?;
+    // A dangling symlink (its mod's files gone) isn't game data; clear it so the new link fits.
+    if fs::symlink_metadata(dst).is_ok_and(|m| m.is_symlink()) && !dst.exists() {
+        fs::remove_file(dst).map_err(err)?;
+    }
+    let fail = |e: std::io::Error| format!("deploy {} -> {}: {e}", src.display(), dst.display());
+    let linked = match mode {
+        _ if real_copy => false,
+        LinkMode::Copy => false,
+        LinkMode::Hardlink => {
+            fs::hard_link(src, dst).map_err(|e| fail(e) + " (hardlink mode: mods folder must be on the game's drive)")?;
+            true
+        }
+        LinkMode::Symlink if !need_hard => symlink(src, dst).is_ok(),
+        LinkMode::Symlink | LinkMode::Auto => fs::hard_link(src, dst).is_ok(),
+    };
+    if !linked {
+        fs::copy(src, dst).map_err(fail)?;
     }
     Ok(())
 }
@@ -444,6 +489,28 @@ impl Manager {
         self.deploy()
     }
 
+    pub fn set_link_mode(&mut self, mode: LinkMode) -> R<()> {
+        self.state.link_mode = mode;
+        self.deploy()
+    }
+
+    /// Whether the mods folder and the game share a volume, i.e. hardlinks can work.
+    pub fn same_volume(&self) -> bool {
+        let (a, b) = (fs::canonicalize(&self.mods_dir), fs::canonicalize(&self.game_path));
+        let (Ok(a), Ok(b)) = (a, b) else { return false };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            matches!((fs::metadata(a), fs::metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev())
+        }
+        // ponytail: drive-letter / UNC-share compare; mounted folders inside a drive read as the same volume.
+        #[cfg(windows)]
+        {
+            let prefix = |p: &Path| p.components().next().map(|c| c.as_os_str().to_ascii_lowercase());
+            prefix(&a) == prefix(&b)
+        }
+    }
+
     pub fn set_game_root(&mut self, id: &str, on: bool) -> R<()> {
         self.state.mods.iter_mut().filter(|m| m.id == id).for_each(|m| m.game_root = on);
         self.deploy()
@@ -521,10 +588,11 @@ impl Manager {
     pub fn deploy(&mut self) -> R<()> {
         let desired: BTreeMap<String, Deployed> = self.wanted().into_iter().collect();
         let deployed = &self.state.deployed;
+        let relink = self.state.link_mode != self.state.deployed_mode;
         let journal: Journal = deployed
             .keys()
             .chain(desired.keys())
-            .filter(|k| deployed.get(*k) != desired.get(*k))
+            .filter(|k| relink || deployed.get(*k) != desired.get(*k))
             .map(|k| (k.clone(), (deployed.get(k).cloned(), desired.get(k).cloned())))
             .collect();
 
@@ -533,6 +601,9 @@ impl Manager {
             write_durable(&self.journal_path(), &serde_json::to_vec(&journal).map_err(err)?)?;
         }
         let result = self.apply(&journal);
+        if result.is_ok() {
+            self.state.deployed_mode = self.state.link_mode;
+        }
         if !journal.is_empty() && self.game.mod_install.path_adjustment_profile == adjust::Profile::NoMansSky {
             // NMS caches its mod list here; stale entries hide changed mods. Best effort, as in C#.
             let _ = fs::remove_file(self.game_path.join("Binaries/SETTINGS/GCMODSETTINGS.MXML"));
@@ -582,7 +653,8 @@ impl Manager {
             } else if target.exists() {
                 let _ = fs::remove_file(&target);
             }
-            link_or_copy(&src, &target, self.game.needs_real_copy(&d.path))?;
+            let g = &self.game;
+            place_file(&src, &target, self.state.link_mode, g.needs_real_copy(&d.path), g.needs_hardlink(&d.path))?;
             crash_point();
             self.state.deployed.insert(key.clone(), d.clone());
         }
@@ -950,6 +1022,98 @@ mod tests {
         assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
         assert_eq!(fs::read_to_string(data.join("Skyrim.esm")).unwrap(), "master");
         assert!(!m.mods_dir.join("Backup").exists() || names(&m.mods_dir.join("Backup")).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_modes() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("game/Data");
+        fs::create_dir_all(data.join("textures")).unwrap();
+        fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        game.mod_install.hardlink_required_extensions = vec![".ogg".into()];
+        game.mod_install.real_file_required_extensions = vec![".dll".into()];
+        let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
+        assert!(m.same_volume());
+        let z = t.path().join("ModA.zip");
+        zip(&z, &[("textures/sky.dds", "A"), ("sound/a.ogg", "o"), ("a.dll", "d")]);
+        let s = m.stage(&z).unwrap();
+        m.install(s, None).unwrap();
+
+        let ino = |p: &Path| fs::metadata(p).unwrap().ino();
+        let is_link = |p: &str| fs::symlink_metadata(data.join(p)).unwrap().is_symlink();
+        let hard = |m: &Manager, p: &str| ino(&data.join(p)) == ino(&m.mods_dir.join("VirtualInstall/ModA").join(p));
+
+        // Auto: hardlinks, except real-copy files.
+        assert!(hard(&m, "textures/sky.dds") && hard(&m, "sound/a.ogg") && !hard(&m, "a.dll"));
+
+        m.set_link_mode(LinkMode::Symlink).unwrap();
+        assert!(is_link("textures/sky.dds"));
+        assert!(!is_link("sound/a.ogg") && hard(&m, "sound/a.ogg"), "hardlink-required ext stays a hardlink");
+        assert!(!is_link("a.dll") && !hard(&m, "a.dll"));
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+
+        m.set_link_mode(LinkMode::Copy).unwrap();
+        assert!(!is_link("textures/sky.dds") && !hard(&m, "textures/sky.dds"));
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+
+        m.set_link_mode(LinkMode::Hardlink).unwrap();
+        assert!(hard(&m, "textures/sky.dds"));
+        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        assert_eq!(reopened.state.link_mode, LinkMode::Hardlink);
+
+        // Symlinked mods still uninstall cleanly and give the game file back.
+        m.set_link_mode(LinkMode::Symlink).unwrap();
+        m.remove("ModA").unwrap();
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
+        assert!(!data.join("sound").exists() && !data.join("a.dll").exists());
+
+        // Strict hardlink reports a failed link instead of quietly copying.
+        let e = place_file(&t.path().join("missing"), &t.path().join("out"), LinkMode::Hardlink, false, false).unwrap_err();
+        assert!(e.contains("hardlink mode"), "{e}");
+    }
+
+    /// Game on another volume (`NMM_TEST_OTHER_VOLUME`, e.g. a mounted disk image), mods in tmp.
+    /// Skips without it.
+    #[cfg(unix)]
+    #[test]
+    fn cross_volume_falls_back() {
+        let Some(other) = std::env::var_os("NMM_TEST_OTHER_VOLUME") else {
+            eprintln!("skipped: NMM_TEST_OTHER_VOLUME not set");
+            return;
+        };
+        let (g, t) = (tempfile::tempdir_in(other).unwrap(), tempfile::tempdir().unwrap());
+        let data = g.path().join("Data");
+        fs::create_dir_all(data.join("textures")).unwrap();
+        fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, g.path().into(), t.path().join("mods")).unwrap();
+        assert!(!m.same_volume());
+        let z = t.path().join("ModA.zip");
+        zip(&z, &[("textures/sky.dds", "A")]);
+        let s = m.stage(&z).unwrap();
+        m.install(s, None).unwrap();
+        let sky = data.join("textures/sky.dds");
+        assert_eq!(fs::read_to_string(&sky).unwrap(), "A");
+        assert!(!fs::symlink_metadata(&sky).unwrap().is_symlink(), "auto copies across volumes");
+
+        m.set_link_mode(LinkMode::Symlink).unwrap();
+        assert!(fs::symlink_metadata(&sky).unwrap().is_symlink());
+
+        let e = m.set_link_mode(LinkMode::Hardlink).unwrap_err();
+        assert!(e.contains("hardlink mode"), "{e}");
+        // Failed deploy rolled back: game still has the mod file or the vanilla one, never nothing.
+        assert!(fs::read_to_string(&sky).is_ok_and(|s| s == "A" || s == "vanilla"));
+
+        m.set_link_mode(LinkMode::Auto).unwrap();
+        m.remove("ModA").unwrap();
+        assert_eq!(fs::read_to_string(&sky).unwrap(), "vanilla");
     }
 
     #[test]
