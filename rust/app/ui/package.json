@@ -6,6 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "test": "node test/order.test.ts",
     "tauri": "cd .. && tauri"
   },
   "dependencies": {
