@@ -3,6 +3,7 @@
 
 mod graphql;
 mod rest;
+pub mod sso;
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};

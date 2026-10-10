@@ -2,6 +2,7 @@
 
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
 use nmm_core::manager::{LinkMode, Manager, ModEntry, Staged};
+use nmm_core::nexus::{self, sso, User};
 use nmm_core::{discover, game, IoContext, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -54,6 +55,10 @@ struct App {
     config: Mutex<()>,
     /// Quit requested while tasks ran: they were cancelled; exit once the last one has rolled back.
     quitting: AtomicBool,
+    /// Nexus client for the stored key (keeps rate-limit state); dropped when key or API setting changes.
+    nexus: Mutex<Option<Arc<nexus::Client>>>,
+    /// Account the stored key belongs to, once validated.
+    user: Mutex<Option<User>>,
 }
 
 impl App {
@@ -344,7 +349,141 @@ async fn settings(app: AppHandle) -> SettingsView {
 
 #[tauri::command]
 async fn save_settings(app: AppHandle, settings: Settings) -> R<()> {
-    update_config(&app, |c| c.settings = settings)
+    update_config(&app, |c| c.settings = settings)?;
+    // API mode may have changed.
+    blocking(move || {
+        app.state::<App>().nexus.lock().unwrap().take();
+        Ok(())
+    })
+    .await
+}
+
+// ---------- Nexus account ----------
+
+/// Run on a blocking thread: reqwest's blocking client panics if built, used or dropped in async code.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> R<T> + Send + 'static) -> R<T> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| nmm_core::Error::Other(format!("internal error: {e}")))?
+}
+
+/// The API key lives in the OS keychain (Keychain / Credential Manager / Secret Service), never in config.json.
+fn key_entry() -> R<keyring::Entry> {
+    keyring::Entry::new("llc.ex-nihilo.nexus-mod-manager", "nexus-api-key")
+        .map_err(|e| format!("keychain: {e}").into())
+}
+
+/// Nexus client for the stored key.
+fn nexus_client(app: &AppHandle) -> R<Arc<nexus::Client>> {
+    let st = app.state::<App>();
+    let mut c = st.nexus.lock().unwrap();
+    if let Some(c) = &*c {
+        return Ok(c.clone());
+    }
+    let key = key_entry()?
+        .get_password()
+        .map_err(|_| "not logged in to Nexus")?;
+    let client = Arc::new(nexus::Client::new(
+        &key,
+        load_config(app).settings.nexus_api,
+    ));
+    *c = Some(client.clone());
+    Ok(client)
+}
+
+/// Validate `key`, then store it as the account key.
+fn adopt_key(app: &AppHandle, key: &str) -> R<User> {
+    let key = key.trim();
+    let user = match nexus::Client::new(key, nexus::Api::Rest).validate() {
+        Err(nmm_core::Error::Unauthorized) => return Err("Nexus rejected this API key".into()),
+        r => r?,
+    };
+    key_entry()?
+        .set_password(key)
+        .map_err(|e| format!("keychain: {e}"))?;
+    let st = app.state::<App>();
+    *st.nexus.lock().unwrap() = None;
+    *st.user.lock().unwrap() = Some(user.clone());
+    tracing::info!(user = %user.name, premium = user.premium, "Nexus key stored");
+    Ok(user)
+}
+
+#[derive(Serialize)]
+struct Account {
+    user: Option<User>,
+    /// Browser login is available (this build has a Nexus application slug).
+    sso: bool,
+    /// Key stored but couldn't be checked (offline, rate limited, rejected).
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn nexus_account(app: AppHandle) -> R<Account> {
+    blocking(move || {
+        let st = app.state::<App>();
+        let sso = sso::APP.is_some();
+        if let Some(u) = st.user.lock().unwrap().clone() {
+            return Ok(Account {
+                user: Some(u),
+                sso,
+                error: None,
+            });
+        }
+        let (user, error) = match nexus_client(&app) {
+            Err(_) => (None, None), // no key stored
+            Ok(c) => match c.validate() {
+                Ok(u) => (Some(u), None),
+                Err(e) => (None, Some(e.to_string())),
+            },
+        };
+        *st.user.lock().unwrap() = user.clone();
+        Ok(Account { user, sso, error })
+    })
+    .await
+}
+
+#[tauri::command]
+async fn nexus_set_key(app: AppHandle, key: String) -> R<User> {
+    blocking(move || adopt_key(&app, &key)).await
+}
+
+/// Task: log in through the browser (SSO); resolves with the account.
+#[tauri::command]
+fn nexus_login(app: AppHandle, id: String) -> R<()> {
+    let slug =
+        sso::APP.ok_or("this build has no Nexus application id; paste an API key instead")?;
+    spawn(
+        &app,
+        id,
+        "nexus".into(),
+        "Nexus SSO login".into(),
+        move |app, task| {
+            use tauri_plugin_opener::OpenerExt;
+            let key = sso::login(sso::URL, slug, &task, &|url| {
+                if let Err(e) = app.opener().open_url(url, None::<&str>) {
+                    tracing::error!("open browser: {e}; visit {url}");
+                }
+            })?;
+            adopt_key(app, &key)
+        },
+    );
+    Ok(())
+}
+
+#[tauri::command]
+async fn nexus_logout(app: AppHandle) -> R<()> {
+    blocking(move || {
+        match key_entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(e) => return Err(format!("keychain: {e}").into()),
+        }
+        let st = app.state::<App>();
+        st.nexus.lock().unwrap().take();
+        st.user.lock().unwrap().take();
+        tracing::info!("Nexus key removed");
+        Ok(())
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -637,6 +776,7 @@ fn main() {
             }
         })
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             init_logging(app.handle());
             Ok(())
@@ -659,7 +799,11 @@ fn main() {
             launch,
             cancel,
             settings,
-            save_settings
+            save_settings,
+            nexus_account,
+            nexus_set_key,
+            nexus_login,
+            nexus_logout
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

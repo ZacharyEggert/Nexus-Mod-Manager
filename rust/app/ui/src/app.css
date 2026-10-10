@@ -32,7 +32,7 @@ td.act button:hover { color:var(--fg); }
 label.sub { display:block; font-size:12px; cursor:pointer; }
 .drop { margin-top:16px; border:2px dashed var(--line); border-radius:8px; padding:18px; text-align:center; color:var(--muted); }
 #status { padding:6px 16px; font-size:12px; color:var(--muted); border-top:1px solid var(--line); background:var(--panel); min-height:28px; }
-#status.err { color:var(--bad); }
+#status.err, .err { color:var(--bad); }
 #tasks > div { display:flex; gap:10px; align-items:center; padding:6px 16px; font-size:12px; border-top:1px solid var(--line); background:var(--panel); }
 #tasks progress { flex:1; max-width:320px; }
 .setup { max-width:560px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; }

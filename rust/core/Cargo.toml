@@ -16,6 +16,8 @@ walkdir = "2"
 thiserror = "2"
 tracing = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "form", "rustls", "charset", "system-proxy"] }
+tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+uuid = { version = "1.28.0", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -61,6 +61,21 @@ export interface SettingsView extends Settings {
   log_dir: string | null;
 }
 
+export interface NexusUser {
+  user_id: number;
+  name: string;
+  premium: boolean;
+  supporter: boolean;
+}
+
+export interface Account {
+  user: NexusUser | null;
+  /** Browser login available in this build. */
+  sso: boolean;
+  /** A key is stored but couldn't be checked. */
+  error: string | null;
+}
+
 export type GroupKind = 'SelectAtLeastOne' | 'SelectAtMostOne' | 'SelectExactlyOne' | 'SelectAll' | 'SelectAny';
 export type PluginType = 'Required' | 'Optional' | 'Recommended' | 'NotUsable' | 'CouldBeUsable';
 
@@ -121,6 +136,9 @@ export const fomodCancel = (token: string) => invoke<void>('fomod_cancel', { tok
 export const launch = (mode: string) => invoke<void>('launch', { mode });
 export const settings = () => invoke<SettingsView>('settings');
 export const saveSettings = (settings: Settings) => invoke<void>('save_settings', { settings });
+export const nexusAccount = () => invoke<Account>('nexus_account');
+export const nexusSetKey = (key: string) => invoke<NexusUser>('nexus_set_key', { key });
+export const nexusLogout = () => invoke<void>('nexus_logout');
 
 // ---------- background tasks ----------
 
@@ -152,6 +170,7 @@ export const fomodInstall = (token: string, sel: Selection) => call<void>('fomod
 export const apply = (mode: string, op: Op) => call<void>('apply', { mode, op });
 export const repair = (mode: string) => call<RepairReport>('repair', { mode });
 export const adopt = (mode: string) => call<RepairReport>('adopt', { mode });
+export const nexusLogin = () => call<NexusUser>('nexus_login', {});
 
 /** What a task rejects with when cancelled. */
 export const CANCELLED = 'cancelled';
