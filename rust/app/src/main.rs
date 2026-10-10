@@ -2,12 +2,14 @@
 
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
 use nmm_core::manager::{LinkMode, Manager, ModEntry, Staged};
-use nmm_core::{discover, game};
+use nmm_core::{discover, game, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
-use std::sync::Mutex;
-use tauri::{AppHandle, Manager as _, State};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager as _, State};
 use tauri_plugin_dialog::DialogExt;
 
 type R<T> = Result<T, String>;
@@ -23,11 +25,97 @@ struct GameConfig {
     mods_dir: PathBuf,
 }
 
-/// ponytail: one global lock serialises every mutation; per-game locks if that ever matters.
 #[derive(Default)]
 struct App {
-    lock: Mutex<()>,
+    /// Per-game lock: background tasks on one game run one at a time, other games run in parallel.
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Task id -> cancel flag, while the task runs.
+    tasks: Mutex<HashMap<String, Arc<AtomicBool>>>,
     staged: Mutex<HashMap<String, (String, Staged)>>,
+    /// Quit requested while tasks ran: they were cancelled; exit once the last one has rolled back.
+    quitting: AtomicBool,
+}
+
+impl App {
+    /// Cancel running tasks and return true when quitting must wait for their rollback.
+    fn hold_quit(&self, app: &AppHandle) -> bool {
+        let tasks = self.tasks.lock().unwrap();
+        if tasks.is_empty() {
+            return false;
+        }
+        tasks.values().for_each(|c| c.store(true, Ordering::Relaxed));
+        self.quitting.store(true, Ordering::Relaxed);
+        let _ = app.emit("quitting", ());
+        true
+    }
+
+    fn lock(&self, mode: &str) -> Arc<Mutex<()>> {
+        self.locks.lock().unwrap().entry(mode.into()).or_default().clone()
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct Progress<'a> {
+    id: &'a str,
+    step: &'a str,
+    done: u64,
+    total: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct Outcome<T> {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Run `f` on a worker thread holding `mode`'s lock. Emits `progress` while it runs, then `done`
+/// (with the result) or `error`, all tagged with the caller-chosen `id`; `cancel(id)` stops it.
+fn spawn<T: Serialize + Clone + 'static>(app: &AppHandle, id: String, mode: String, f: impl FnOnce(&AppHandle, Task) -> R<T> + Send + 'static) {
+    let st = app.state::<App>();
+    let task = Task::default();
+    st.tasks.lock().unwrap().insert(id.clone(), task.cancel.clone());
+    let lock = st.lock(&mode);
+    let (app, emit_id) = (app.clone(), id.clone());
+    let emitter = app.clone();
+    let last = Mutex::new(Instant::now() - Duration::from_secs(1));
+    let progress = move |step: &str, done: u64, total: u64| {
+        // ponytail: ~20 events/s cap; plenty for a progress bar.
+        let mut l = last.lock().unwrap();
+        if l.elapsed() >= Duration::from_millis(50) {
+            *l = Instant::now();
+            let _ = emitter.emit("progress", Progress { id: &emit_id, step, done, total });
+        }
+    };
+    let task = Task { progress: Arc::new(progress), ..task };
+    std::thread::spawn(move || {
+        let res = {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&app, task))).unwrap_or_else(|_| Err("internal error (panic)".into()))
+        };
+        let st = app.state::<App>();
+        let last = {
+            let mut tasks = st.tasks.lock().unwrap();
+            tasks.remove(&id);
+            tasks.is_empty()
+        };
+        let _ = match res {
+            Ok(v) => app.emit("done", Outcome { id, result: Some(v), error: None }),
+            Err(e) => app.emit("error", Outcome::<()> { id, result: None, error: Some(e) }),
+        };
+        if last && st.quitting.load(Ordering::Relaxed) {
+            app.exit(0);
+        }
+    });
+}
+
+#[tauri::command]
+fn cancel(st: State<'_, App>, id: String) {
+    if let Some(c) = st.tasks.lock().unwrap().get(&id) {
+        c.store(true, Ordering::Relaxed);
+    }
 }
 
 fn config_path(app: &AppHandle) -> R<PathBuf> {
@@ -46,10 +134,19 @@ fn default_mods_dir(app: &AppHandle, mode: &str) -> R<PathBuf> {
     Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("Mods").join(mode))
 }
 
+/// Open a game's manager. Callers that write must hold the game's lock (i.e. run inside `spawn`).
 fn manager(app: &AppHandle, mode: &str) -> R<Manager> {
     let def = game::find(mode).ok_or("unknown game")?;
     let cfg = load_config(app).games.get(mode).cloned().ok_or("game path not set")?;
     Manager::open(def, cfg.game_path, cfg.mods_dir)
+}
+
+/// Read-only view for commands that don't mutate. Waits out a running task, since `open`
+/// may recover a deploy journal; the UI only reads between tasks.
+fn read(app: &AppHandle, mode: &str) -> R<Manager> {
+    let lock = app.state::<App>().lock(mode);
+    let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+    manager(app, mode)
 }
 
 #[derive(Serialize)]
@@ -105,12 +202,14 @@ struct Library {
     install_root: PathBuf,
     link_mode: LinkMode,
     same_volume: bool,
+    in_sync: bool,
 }
 
 #[tauri::command]
 async fn library(app: AppHandle, mode: String) -> R<Library> {
-    let m = manager(&app, &mode)?;
+    let m = read(&app, &mode)?;
     Ok(Library {
+        in_sync: m.in_sync(),
         conflicts: m.conflicts(),
         install_root: m.install_root(),
         link_mode: m.state.link_mode,
@@ -134,29 +233,31 @@ async fn pick_folder(app: AppHandle) -> Option<String> {
     app.dialog().file().blocking_pick_folder().map(|p| p.to_string())
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct StageResult {
     token: Option<String>,
     fomod: Option<ModuleConfig>,
 }
 
-/// Extract an archive; plain mods install right away, FOMods return their config for the wizard.
+/// Task: extract an archive; plain mods install right away, FOMods return their config for the wizard.
 #[tauri::command]
-async fn stage(app: AppHandle, st: State<'_, App>, mode: String, archive: PathBuf) -> R<StageResult> {
-    let _g = st.lock.lock().unwrap();
-    let mut m = manager(&app, &mode)?;
-    let staged = m.stage(&archive)?;
-    match staged.fomod.clone() {
-        None => {
-            m.install(staged, None)?;
-            Ok(StageResult { token: None, fomod: None })
+fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf) {
+    spawn(&app, id, mode.clone(), move |app, task| {
+        let mut m = manager(app, &mode)?;
+        m.task = task;
+        let staged = m.stage(&archive)?;
+        match staged.fomod.clone() {
+            None => {
+                m.transact(|m| m.install(staged, None))?;
+                Ok(StageResult { token: None, fomod: None })
+            }
+            Some((_, cfg)) => {
+                let token = staged.id.clone();
+                app.state::<App>().staged.lock().unwrap().insert(token.clone(), (mode, staged));
+                Ok(StageResult { token: Some(token), fomod: Some(cfg) })
+            }
         }
-        Some((_, cfg)) => {
-            let token = staged.id.clone();
-            st.staged.lock().unwrap().insert(token.clone(), (mode, staged));
-            Ok(StageResult { token: Some(token), fomod: Some(cfg) })
-        }
-    }
+    });
 }
 
 fn staged(st: &State<'_, App>, token: &str) -> R<(String, Staged)> {
@@ -166,7 +267,7 @@ fn staged(st: &State<'_, App>, token: &str) -> R<(String, Staged)> {
 #[tauri::command]
 async fn fomod_eval(app: AppHandle, st: State<'_, App>, token: String, sel: Selection) -> R<Eval> {
     let (mode, s) = staged(&st, &token)?;
-    let m = manager(&app, &mode)?;
+    let m = read(&app, &mode)?;
     Ok(s.fomod.unwrap().1.evaluate(&sel, &|n| m.file_state(n)))
 }
 
@@ -184,12 +285,17 @@ async fn fomod_image(st: State<'_, App>, token: String, path: String) -> R<tauri
     Ok(tauri::ipc::Response::new(std::fs::read(hit.path()).map_err(|e| e.to_string())?))
 }
 
+/// Task: install a staged FOMod with the wizard's selection.
 #[tauri::command]
-async fn fomod_install(app: AppHandle, st: State<'_, App>, token: String, sel: Selection) -> R<()> {
-    let _g = st.lock.lock().unwrap();
+fn fomod_install(app: AppHandle, st: State<'_, App>, id: String, token: String, sel: Selection) -> R<()> {
     let (mode, s) = staged(&st, &token)?;
-    manager(&app, &mode)?.install(s, Some(&sel))?;
-    st.staged.lock().unwrap().remove(&token);
+    spawn(&app, id, mode.clone(), move |app, task| {
+        let mut m = manager(app, &mode)?;
+        m.task = task;
+        // Staging dir is consumed whether install succeeds, fails or is cancelled.
+        app.state::<App>().staged.lock().unwrap().remove(&token);
+        m.transact(|m| m.install(s, Some(&sel)))
+    });
     Ok(())
 }
 
@@ -215,10 +321,17 @@ enum Op {
     Redeploy,
 }
 
+/// Task: change intent and redeploy; a cancel rolls back to the previous intent.
 #[tauri::command]
-async fn apply(app: AppHandle, st: State<'_, App>, mode: String, op: Op) -> R<()> {
-    let _g = st.lock.lock().unwrap();
-    let mut m = manager(&app, &mode)?;
+fn apply(app: AppHandle, id: String, mode: String, op: Op) {
+    spawn(&app, id, mode.clone(), move |app, task| {
+        let mut m = manager(app, &mode)?;
+        m.task = task;
+        m.transact(|m| run_op(m, op))
+    });
+}
+
+fn run_op(m: &mut Manager, op: Op) -> R<()> {
     match op {
         Op::SetActive { id, active } => m.set_active(&id, active),
         Op::SetGameRoot { id, on } => m.set_game_root(&id, on),
@@ -234,20 +347,36 @@ async fn apply(app: AppHandle, st: State<'_, App>, mode: String, op: Op) -> R<()
 
 #[tauri::command]
 async fn launch(app: AppHandle, mode: String) -> R<()> {
-    let m = manager(&app, &mode)?;
+    let m = read(&app, &mode)?;
     let exe = m.game.executable(&m.game_path).ok_or("no executable defined")?;
     std::process::Command::new(&exe).current_dir(&m.game_path).spawn().map_err(|e| format!("{}: {e}", exe.display()))?;
     Ok(())
 }
 
 fn main() {
+    // Closing/quitting mid-task cancels it and waits for the rollback, so the game is never left
+    // half-modded (a hard kill is covered by Manager::open's recovery instead).
     tauri::Builder::default()
+        .on_window_event(|w, e| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                if w.state::<App>().hold_quit(w.app_handle()) {
+                    api.prevent_close();
+                }
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .manage(App::default())
         .invoke_handler(tauri::generate_handler![
             games, configure, library, pick_archive, pick_folder, stage, fomod_eval, fomod_image, fomod_install,
-            fomod_cancel, apply, launch
+            fomod_cancel, apply, launch, cancel
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, e| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = e {
+                if app.state::<App>().hold_quit(app) {
+                    api.prevent_exit();
+                }
+            }
+        });
 }

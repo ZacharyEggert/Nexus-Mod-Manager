@@ -8,6 +8,8 @@ const h = (tag, props = {}, ...kids) => {
 
 let games = [];
 let cur = null;
+let lib = null; // last library shown for `cur`
+let launchAnyway = false;
 
 function status(msg, err = false) {
   $('#status').textContent = msg || '';
@@ -21,9 +23,49 @@ async function run(label, fn) {
     status(label + ' — done');
     return r;
   } catch (e) {
-    status(`${label} failed: ${e}`, true);
+    if (e === 'cancelled') status(label + ' — cancelled');
+    else status(`${label} failed: ${e}`, true);
     throw e;
   }
+}
+
+// ---------- background tasks ----------
+
+const pending = new Map();
+for (const ev of ['progress', 'done', 'error']) {
+  window.__TAURI__.event.listen(ev, ({ payload }) => pending.get(payload.id)?.[ev](payload));
+}
+let seq = 0;
+
+window.__TAURI__.event.listen('quitting', () => {
+  document.querySelectorAll('#tasks button').forEach((b) => { b.disabled = true; });
+  status('Undoing unfinished changes before closing…');
+});
+
+// Run a backend task (`cmd` spawns it under `id`): shows progress + Cancel, resolves with its result.
+function task(label, cmd, args) {
+  const id = `t${++seq}`;
+  const bar = h('progress', { ariaLabel: label });
+  const step = h('span', { className: 'muted' });
+  const stop = h('button', { className: 'btn', textContent: 'Cancel', onclick: () => {
+    stop.disabled = true;
+    invoke('cancel', { id });
+  } });
+  const row = h('div', {}, h('span', { textContent: label }), bar, step, stop);
+  $('#tasks').append(row);
+  return run(label, () => new Promise((resolve, reject) => {
+    const end = (fn) => (p) => { pending.delete(id); row.remove(); fn(p); };
+    pending.set(id, {
+      progress: (p) => {
+        if (p.step === 'Rolling back') stop.disabled = true;
+        step.textContent = p.total ? `${p.step} ${p.done}/${p.total}` : `${p.step} ${p.done}`;
+        if (p.total) Object.assign(bar, { max: p.total, value: p.done });
+      },
+      done: end((p) => resolve(p.result)),
+      error: end((p) => reject(p.error)),
+    });
+    invoke(cmd, { ...args, id }).catch(end(reject));
+  }));
 }
 
 // ---------- games ----------
@@ -41,6 +83,7 @@ async function loadGames() {
 
 async function select(mode) {
   cur = games.find((g) => g.mode_id === mode);
+  lib = null;
   $('#title').textContent = cur.name;
   await loadGames();
   cur.game_path ? renderLibrary() : renderSetup();
@@ -78,13 +121,14 @@ const LINK_MODES = [
 ];
 
 async function op(label, o) {
-  await run(label, () => invoke('apply', { mode: cur.mode_id, op: o }));
+  await task(label, 'apply', { mode: cur.mode_id, op: o }).catch(() => {});
   renderLibrary();
 }
 
 async function renderLibrary() {
   $('#tools').hidden = false;
-  let lib;
+  lib = null;
+  launchAnyway = false;
   try {
     lib = await invoke('library', { mode: cur.mode_id });
   } catch (e) {
@@ -127,6 +171,8 @@ async function renderLibrary() {
       : lib.link_mode === 'symlink'
         ? 'The mods folder is on a different drive than the game. Symlinks work, but break if that drive is disconnected.'
         : 'The mods folder is on a different drive than the game, so mod files are copied (uses extra space). Symlinks avoid the copy; moving the mods folder to the game’s drive avoids both.' }),
+    !lib.in_sync && h('p', { className: 'conf' }, 'Some mod files aren’t deployed (an earlier deploy failed partway). ',
+      h('button', { className: 'btn', textContent: 'Redeploy', onclick: () => op('Redeploying', { op: 'redeploy' }) })),
     lib.mods.length
       ? h('table', {}, h('thead', {}, h('tr', {}, h('th', { textContent: '#' }), h('th', { textContent: 'On' }), h('th', { textContent: 'Mod' }), h('th', { textContent: 'Files' }), h('th'))), h('tbody', {}, rows))
       : h('p', { textContent: 'No mods installed yet.' }),
@@ -136,9 +182,10 @@ async function renderLibrary() {
 
 async function install(path) {
   if (!cur?.game_path) return status('Pick and set up a game first', true);
-  const res = await run(`Installing ${path.split(/[\\/]/).pop()}`, () => invoke('stage', { mode: cur.mode_id, archive: path }));
-  if (res.token) await wizard(res.token, res.fomod);
-  renderLibrary();
+  const mode = cur.mode_id;
+  const res = await task(`Installing ${path.split(/[\\/]/).pop()}`, 'stage', { mode, archive: path }).catch(() => null);
+  if (res?.token) await wizard(res.token, res.fomod);
+  if (cur?.mode_id === mode) renderLibrary();
 }
 
 // ---------- FOMod wizard ----------
@@ -154,9 +201,9 @@ function wizard(token, cfg) {
     let ev;
     const imgCache = {};
 
-    const close = (installed) => {
+    const close = () => {
       dlg.close();
-      if (!installed) invoke('fomod_cancel', { token });
+      invoke('fomod_cancel', { token });
       resolve();
     };
 
@@ -243,17 +290,18 @@ function wizard(token, cfg) {
           h('div', { className: 'opts' }, groups.length ? groups : h('p', { textContent: 'Ready to install.' }), err.length ? h('p', { className: 'conf', textContent: err.join(' ') }) : null),
           info,
           h('footer', {},
-            h('button', { className: 'btn', textContent: 'Cancel', onclick: () => close(false) }),
+            h('button', { className: 'btn', textContent: 'Cancel', onclick: () => close() }),
             h('button', { className: 'btn', textContent: 'Back', disabled: back < 0, onclick: () => { step = back; render(); } }),
             fwd >= 0
               ? h('button', { className: 'btn primary', textContent: 'Next', disabled: err.length > 0, onclick: () => { step = fwd; render(); } })
               : h('button', { className: 'btn primary', textContent: 'Install', disabled: err.length > 0, onclick: async () => {
-                  await run('Installing', () => invoke('fomod_install', { token, sel: selArr() }));
-                  close(true);
+                  dlg.close();
+                  await task(`Installing ${cfg.name || 'mod'}`, 'fomod_install', { token, sel: selArr() }).catch(() => {});
+                  resolve();
                 } }))));
     }
 
-    dlg.oncancel = (e) => { e.preventDefault(); close(false); };
+    dlg.oncancel = (e) => { e.preventDefault(); close(); };
     render().then(() => dlg.showModal());
   });
 }
@@ -273,7 +321,15 @@ $('#psave').onclick = () => {
   op(`Saving profile ${name}`, { op: 'save_profile', name });
 };
 $('#settings').onclick = renderSetup;
-$('#launch').onclick = () => run(`Launching ${cur.name}`, () => invoke('launch', { mode: cur.mode_id }));
+$('#launch').onclick = () => {
+  // Out of sync = a deploy failed partway; ask once (second click launches anyway).
+  if (lib && !lib.in_sync && !launchAnyway) {
+    launchAnyway = true;
+    return status('Some mod files aren’t deployed. Redeploy first, or click Launch again to launch anyway.', true);
+  }
+  launchAnyway = false;
+  return run(`Launching ${cur.name}`, () => invoke('launch', { mode: cur.mode_id }));
+};
 
 window.__TAURI__.event.listen('tauri://drag-drop', async (e) => {
   for (const p of e.payload.paths) await install(p).catch(() => {});

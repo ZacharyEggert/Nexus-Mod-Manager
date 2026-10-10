@@ -38,6 +38,8 @@
   .drop { margin-top:16px; border:2px dashed var(--line); border-radius:8px; padding:18px; text-align:center; color:var(--muted); }
   #status { padding:6px 16px; font-size:12px; color:var(--muted); border-top:1px solid var(--line); background:var(--panel); min-height:28px; }
   #status.err { color:var(--bad); }
+  #tasks > div { display:flex; gap:10px; align-items:center; padding:6px 16px; font-size:12px; border-top:1px solid var(--line); background:var(--panel); }
+  #tasks progress { flex:1; max-width:320px; }
   .setup { max-width:560px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; }
   .setup label { display:block; margin:12px 0 4px; color:var(--muted); font-size:12px; }
   .row { display:flex; gap:8px; } .row input { flex:1; min-width:0; }
@@ -72,6 +74,7 @@
     </span>
   </div>
   <div id="content"></div>
+  <div id="tasks"></div>
   <div id="status" role="status" aria-live="polite"></div>
 </main>
 <dialog id="wizard"></dialog>

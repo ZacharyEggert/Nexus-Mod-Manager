@@ -6,10 +6,14 @@
 //! displaced by mods, `GameRootInstall/<id>/…` + `GameRootBackup/…` the same for files deployed to
 //! the game root instead of the install root (script extenders), `.staging/` scratch, `state.json`, and `deploy.journal` while a deploy
 //! is in flight (reconciled against the filesystem on the next `open` if we died mid-deploy).
+//! `.pending/<id>` marks a mod being installed or removed; only marked mods' files are ever deleted
+//! (see `resolve_pending`), so a lost or stale `state.json` can't wipe the library.
 
 use crate::adjust::{self, Dest};
 use crate::fomod::{self, ModuleConfig, Selection};
 use crate::game::{has_ext, GameDef};
+use crate::Task;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -125,6 +129,8 @@ pub struct Manager {
     pub game_path: PathBuf,
     pub mods_dir: PathBuf,
     pub state: State,
+    /// Progress + cancel for long operations (extract, install copy, deploy).
+    pub task: Task,
 }
 
 const IGNORED: &[&str] = &["meta.ini"];
@@ -222,9 +228,24 @@ fn place_file(src: &Path, dst: &Path, mode: LinkMode, real_copy: bool, need_hard
         LinkMode::Symlink | LinkMode::Auto => fs::hard_link(src, dst).is_ok(),
     };
     if !linked {
-        fs::copy(src, dst).map_err(fail)?;
+        copy_atomic(src, dst).map_err(fail)?;
     }
     Ok(())
+}
+
+/// Scratch name for a copy in flight; `reconcile` deletes strays.
+fn tmp_path(p: &Path) -> PathBuf {
+    let mut name = p.file_name().unwrap_or_default().to_os_string();
+    name.push(".nmm-tmp");
+    p.with_file_name(name)
+}
+
+/// Copy via tmp + rename, so a kill mid-copy never leaves a torn `dst`.
+fn copy_atomic(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let tmp = tmp_path(dst);
+    fs::copy(src, &tmp)?;
+    crash_point();
+    fs::rename(&tmp, dst)
 }
 
 fn move_file(src: &Path, dst: &Path) -> R<()> {
@@ -232,7 +253,7 @@ fn move_file(src: &Path, dst: &Path) -> R<()> {
         fs::create_dir_all(p).map_err(err)?;
     }
     if fs::rename(src, dst).is_err() {
-        fs::copy(src, dst).map_err(err)?;
+        copy_atomic(src, dst).map_err(err)?;
         fs::remove_file(src).map_err(err)?;
     }
     Ok(())
@@ -322,13 +343,45 @@ impl Manager {
             None if mods_dir.join("state.json").exists() => return Err("state.json and its backup are unreadable".into()),
             None => State::default(),
         };
-        let mut m = Self { game, game_path, mods_dir, state };
+        let mut m = Self { game, game_path, mods_dir, state, task: Task::default() };
         if let Ok(s) = fs::read_to_string(m.journal_path()) {
             let journal = serde_json::from_str(&s).map_err(|e| format!("unreadable deploy.journal ({e}); delete it to continue"))?;
             m.reconcile(&journal)?;
             m.finish()?;
+            // The kill interrupted a change (or its rollback) before state was saved: deploy the
+            // saved intent so the game holds all of it or none, not half a mod until a manual redeploy.
+            // ponytail: a failure here just leaves in_sync() false; the UI offers Redeploy.
+            let _ = m.deploy();
         }
+        // ponytail: a failure leaves the marker; the next open retries.
+        let _ = m.resolve_pending();
         Ok(m)
+    }
+
+    /// Mark `id`'s stored files as possibly orphaned until the install/remove settles.
+    fn mark_pending(&self, id: &str) -> R<()> {
+        let dir = self.mods_dir.join(".pending");
+        fs::create_dir_all(&dir).map_err(err)?;
+        fs::write(dir.join(id), b"").map_err(err)
+    }
+
+    /// Settle every marked mod: delete its stored files when it's neither listed nor deployed,
+    /// then drop the marker. Unmarked files are never deleted, whatever `state.json` says.
+    fn resolve_pending(&self) -> R<()> {
+        for e in fs::read_dir(self.mods_dir.join(".pending")).into_iter().flatten().filter_map(Result::ok) {
+            let id = e.file_name().to_string_lossy().into_owned();
+            let used = self.state.mods.iter().any(|m| m.id == id) || self.state.deployed.values().any(|d| d.mod_id == id);
+            if !used {
+                for dir in [self.virtual_dir(&id), self.mods_dir.join("GameRootInstall").join(&id)] {
+                    match fs::remove_dir_all(dir) {
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(err(e)),
+                        _ => {}
+                    }
+                }
+            }
+            fs::remove_file(e.path()).map_err(err)?;
+        }
+        Ok(())
     }
 
     pub fn save(&self) -> R<()> {
@@ -371,17 +424,26 @@ impl Manager {
     pub fn stage(&self, archive: &Path) -> R<Staged> {
         let stem = archive.file_stem().and_then(|s| s.to_str()).ok_or("bad archive name")?;
         let id: String = stem.chars().map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' }).collect();
+        // "." / ".." would make VirtualInstall/<id> the store itself (and `remove` delete it).
+        if id.trim_matches('.').is_empty() {
+            return Err("bad archive name".into());
+        }
         if self.state.mods.iter().any(|m| m.id == id) {
             return Err(format!("'{id}' is already installed; remove it first"));
         }
         let dir = self.mods_dir.join(".staging").join(&id);
         let _ = fs::remove_dir_all(&dir);
-        crate::archive::extract(archive, &dir)?;
-        let fomod = match fomod::locate(&dir) {
-            Some((base, cfg)) => Some((base, fomod::parse(&fs::read(cfg).map_err(err)?)?)),
-            None => None,
-        };
-        Ok(Staged { id, archive: archive.to_path_buf(), dir, fomod })
+        let fomod = crate::archive::extract(archive, &dir, &self.task).and_then(|()| match fomod::locate(&dir) {
+            Some((base, cfg)) => Ok(Some((base, fomod::parse(&fs::read(cfg).map_err(err)?)?))),
+            None => Ok(None),
+        });
+        match fomod {
+            Ok(fomod) => Ok(Staged { id, archive: archive.to_path_buf(), dir, fomod }),
+            Err(e) => {
+                let _ = fs::remove_dir_all(&dir);
+                Err(e)
+            }
+        }
     }
 
     /// Install a staged archive. `sel` is required when the archive is a FOMod.
@@ -453,13 +515,21 @@ impl Manager {
         }
 
         let (mut files, mut root_files) = (vec![], vec![]);
-        for (src, dest, game_root) in map.into_values() {
+        let n = map.len() as u64;
+        self.mark_pending(&staged.id)?;
+        let copied = map.into_values().enumerate().try_for_each(|(i, (src, dest, game_root))| {
+            self.task.step("Copying mod files", i as u64, n)?;
             let to = self.place(&Deployed { path: dest.clone(), mod_id: staged.id.clone(), game_root, src: None }).src;
             fs::create_dir_all(to.parent().unwrap()).map_err(err)?;
             fs::copy(&src, &to).map_err(err)?;
             if game_root { &mut root_files } else { &mut files }.push(dest);
-        }
+            Ok::<_, String>(())
+        });
         let _ = fs::remove_dir_all(&staged.dir);
+        if let Err(e) = copied {
+            let _ = self.resolve_pending();
+            return Err(e);
+        }
         self.state.mods.push(ModEntry {
             id: staged.id,
             name,
@@ -469,19 +539,43 @@ impl Manager {
             game_root: game_root || profile_root,
             active: true,
         });
-        self.deploy()
+        self.deploy()?;
+        self.resolve_pending()
+    }
+
+    /// Run an intent change (+ its deploy) all-or-nothing w.r.t. cancel: if `op` is cancelled,
+    /// restore the previous mod list and link mode, deploy back to them (not cancellable), and
+    /// delete files of mods `op` was installing. Still returns `Err(CANCELLED)`.
+    pub fn transact(&mut self, op: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
+        let (mods, link_mode) = (self.state.mods.clone(), self.state.link_mode);
+        let result = op(self);
+        if result.as_ref().err().map(String::as_str) != Some(Task::CANCELLED) {
+            return result;
+        }
+        if link_mode != self.state.link_mode {
+            // Part of the deploy was relinked in the new mode; relink everything back.
+            self.state.deployed_mode = self.state.link_mode;
+        }
+        self.state.mods = mods;
+        self.state.link_mode = link_mode;
+        let progress = self.task.progress.clone();
+        let task = std::mem::replace(
+            &mut self.task,
+            Task { cancel: Default::default(), progress: Arc::new(move |_, done, total| progress("Rolling back", done, total)) },
+        );
+        let rolled_back = self.deploy();
+        self.task = task;
+        rolled_back?;
+        // Files of a mod the op added (or was removing) are kept or deleted per the restored list.
+        self.resolve_pending()?;
+        result
     }
 
     pub fn remove(&mut self, id: &str) -> R<()> {
+        self.mark_pending(id)?;
         self.state.mods.retain(|m| m.id != id);
         self.deploy()?;
-        for dir in [self.virtual_dir(id), self.mods_dir.join("GameRootInstall").join(id)] {
-            match fs::remove_dir_all(dir) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(err(e)),
-                _ => {}
-            }
-        }
-        Ok(())
+        self.resolve_pending()
     }
 
     pub fn set_active(&mut self, id: &str, active: bool) -> R<()> {
@@ -581,6 +675,12 @@ impl Manager {
 
     // ---------- deploy ----------
 
+    /// Whether what's linked matches what active mods want; false after a cancelled or failed deploy.
+    pub fn in_sync(&self) -> bool {
+        let desired: BTreeMap<String, Deployed> = self.wanted().into_iter().collect();
+        self.state.link_mode == self.state.deployed_mode && desired == self.state.deployed
+    }
+
     fn journal_path(&self) -> PathBuf {
         self.mods_dir.join("deploy.journal")
     }
@@ -626,8 +726,16 @@ impl Manager {
     }
 
     fn apply(&mut self, journal: &Journal) -> R<()> {
+        // A cancel is just an early error: deploy() reconciles the partial apply like any failure.
+        let n = journal.values().map(|(o, n)| o.is_some() as u64 + n.is_some() as u64).sum();
+        let mut i = 0;
+        let mut step = |task: &Task| {
+            i += 1;
+            task.step("Deploying", i - 1, n)
+        };
         for (key, (old, new)) in journal {
             let Some(d) = old else { continue };
+            step(&self.task)?;
             let Place { target, saved, root, backup, .. } = self.place(d);
             match fs::remove_file(&target) {
                 Ok(()) => {}
@@ -646,6 +754,7 @@ impl Manager {
         }
         for (key, (_, new)) in journal {
             let Some(d) = new else { continue };
+            step(&self.task)?;
             let Place { target, saved, src, .. } = self.place(d);
             if target.exists() && !saved.exists() {
                 move_file(&target, &saved)?;
@@ -665,6 +774,10 @@ impl Manager {
     /// game files stranded in Backup. Converges any partial `apply`; the next deploy redoes the rest.
     fn reconcile(&mut self, journal: &Journal) -> R<()> {
         for (key, (old, new)) in journal {
+            let p = self.place(new.as_ref().or(old.as_ref()).unwrap());
+            for t in [&p.target, &p.saved] {
+                let _ = fs::remove_file(tmp_path(t));
+            }
             let live = [new, old].into_iter().flatten().find(|d| {
                 let p = self.place(d);
                 same_content(&p.src, &p.target)
@@ -720,6 +833,7 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::io::Write;
 
     fn zip(path: &Path, files: &[(&str, &str)]) {
@@ -780,14 +894,114 @@ mod tests {
         assert_eq!(reopened.state.mods.len(), 1);
     }
 
+    /// Cancel at the Nth progress step: extract leaves no staging junk; a cancelled install,
+    /// toggle or relink rolls the game and state back to exactly how they were.
+    #[test]
+    fn cancel_rolls_back() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("game/Data");
+        fs::create_dir_all(data.join("textures")).unwrap();
+        fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
+        let mut game = crate::game::find("Fallout4").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
+        let a = t.path().join("ModA.zip");
+        zip(&a, &[("textures/sky.dds", "A"), ("textures/a.dds", "a")]);
+        let b = t.path().join("ModB.zip");
+        zip(&b, &[("textures/sky.dds", "B"), ("textures/b.dds", "b"), ("textures/c.dds", "c")]);
+        let s = m.stage(&a).unwrap();
+        m.install(s, None).unwrap();
+
+        // Cancel once `n` steps of `label` have reported; rollback steps are counted too.
+        let rollback_steps = Arc::new(AtomicU64::new(0));
+        let cancel_after = |m: &mut Manager, label: &'static str, n: u64| {
+            let task = Task::default();
+            let (flag, seen, rb) = (task.cancel.clone(), Arc::new(AtomicU64::new(0)), rollback_steps.clone());
+            m.task = Task {
+                progress: Arc::new(move |l, _, _| {
+                    if l == "Rolling back" {
+                        rb.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if l == label && seen.fetch_add(1, Ordering::Relaxed) + 1 == n {
+                        flag.store(true, Ordering::Relaxed)
+                    }
+                }),
+                ..task
+            };
+        };
+        let sky = || fs::read_to_string(data.join("textures/sky.dds")).unwrap();
+        let unchanged = |m: &Manager| {
+            assert!(m.in_sync() && !m.journal_path().exists());
+            assert_eq!(m.state.mods.iter().map(|x| (x.id.as_str(), x.active)).collect::<Vec<_>>(), [("ModA", true)]);
+            assert_eq!(sky(), "A");
+            assert!(data.join("textures/a.dds").exists() && !data.join("textures/b.dds").exists());
+            let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+            assert_eq!(reopened.state.deployed, m.state.deployed);
+        };
+
+        cancel_after(&mut m, "Extracting", 1);
+        assert_eq!(m.stage(&b).unwrap_err(), Task::CANCELLED);
+        assert!(!m.mods_dir.join(".staging/ModB").exists());
+
+        // Install: cancelled mid-copy, then mid-deploy (after ModA's sky.dds was unlinked).
+        for (label, n) in [("Copying mod files", 1), ("Deploying", 1), ("Deploying", 3)] {
+            cancel_after(&mut m, label, n);
+            let s = m.stage(&b).unwrap();
+            assert_eq!(m.transact(|m| m.install(s, None)).unwrap_err(), Task::CANCELLED, "{label} {n}");
+            unchanged(&m);
+            assert!(!m.virtual_dir("ModB").exists());
+        }
+
+        cancel_after(&mut m, "Deploying", 1);
+        assert_eq!(m.transact(|m| m.set_active("ModA", false)).unwrap_err(), Task::CANCELLED);
+        unchanged(&m);
+
+        cancel_after(&mut m, "Deploying", 1);
+        assert_eq!(m.transact(|m| m.set_link_mode(LinkMode::Copy)).unwrap_err(), Task::CANCELLED);
+        unchanged(&m);
+        assert_eq!(m.state.link_mode, LinkMode::Auto);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let links = |p: &str| fs::metadata(data.join(p)).unwrap().nlink();
+            assert!(links("textures/sky.dds") > 1 && links("textures/a.dds") > 1, "relinked back to hardlinks");
+        }
+        assert!(rollback_steps.load(Ordering::Relaxed) > 0);
+
+        m.task = Task::default();
+        m.transact(|m| m.remove("ModA")).unwrap();
+        assert_eq!(sky(), "vanilla");
+
+        assert!(!m.virtual_dir("ModA").exists() && !m.mods_dir.join(".pending/ModA").exists());
+
+        // Killed mid-install-copy: the marked, unlisted mod is deleted on the next open; an
+        // unmarked folder the state doesn't know about is left alone.
+        let reopen = |m: &Manager| Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        fs::create_dir_all(m.mods_dir.join("VirtualInstall/ModB/textures")).unwrap();
+        fs::create_dir_all(m.mods_dir.join("VirtualInstall/Stranger")).unwrap();
+        m.mark_pending("ModB").unwrap();
+        reopen(&m);
+        assert!(!m.virtual_dir("ModB").exists() && m.virtual_dir("Stranger").exists());
+
+        // A lost state.json (or a stale .bak) never costs installed mods their files.
+        m.transact(|m| m.install(m.stage(&a)?, None)).unwrap();
+        fs::remove_file(m.mods_dir.join("state.json")).unwrap();
+        fs::remove_file(m.mods_dir.join("state.json.bak")).unwrap();
+        assert!(reopen(&m).state.mods.is_empty());
+        assert!(m.virtual_dir("ModA").join("textures/sky.dds").exists());
+    }
+
     /// Kill deploy after every possible filesystem step; reopen must leave state matching disk
     /// and lose no game file, and a follow-up deploy must still converge.
     #[test]
     fn crash_mid_deploy_recovers() {
-        // (active before, active after, expected sky.dds after)
-        let cases: [(&[&str], &[&str], &str); 3] =
-            [(&["ModA"], &["ModB"], "B"), (&["ModA"], &[], "vanilla"), (&[], &["ModA"], "A")];
-        for (before, after, want) in cases {
+        // (active before, sky.dds before, active after, sky.dds after)
+        let cases: [(&[&str], &str, &[&str], &str); 3] =
+            [(&["ModA"], "A", &["ModB"], "B"), (&["ModA"], "A", &[], "vanilla"), (&[], "vanilla", &["ModA"], "A")];
+        // Copy mode exercises kills between a copy's tmp write and its rename.
+        for (mode, (before, was, after, want)) in [LinkMode::Auto, LinkMode::Copy].into_iter().flat_map(|l| cases.map(|c| (l, c))) {
             let mut crashes = 0;
             for n in 0.. {
                 let t = tempfile::tempdir().unwrap();
@@ -798,6 +1012,7 @@ mod tests {
                 game.plugin.as_mut().unwrap().policy = None;
                 game.gamebryo = None;
                 let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
+                m.state.link_mode = mode;
                 for (name, files) in [("ModA", &[("textures/sky.dds", "A"), ("A.esp", "p")][..]), ("ModB", &[("textures/sky.dds", "B")])] {
                     let z = t.path().join(format!("{name}.zip"));
                     zip(&z, files);
@@ -817,6 +1032,12 @@ mod tests {
 
                 let mut m = Manager::open(game, game_path, mods_dir).unwrap();
                 assert!(!m.journal_path().exists());
+                // Reopen finishes the job: the game holds the saved intent, all of it.
+                assert!(m.in_sync(), "{mode:?} n={n}");
+                assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), if crashed { was } else { want }, "{mode:?} n={n}");
+                assert_eq!(data.join("A.esp").exists(), (if crashed { before } else { after }).contains(&"ModA"), "{mode:?} n={n}");
+                let strays = walkdir::WalkDir::new(t.path()).into_iter().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().ends_with(".nmm-tmp")).count();
+                assert_eq!(strays, 0, "{mode:?} n={n}");
                 for d in m.state.deployed.values() {
                     assert!(same_content(&m.virtual_dir(&d.mod_id).join(&d.path), &data.join(&d.path)), "n={n} {d:?}");
                 }
