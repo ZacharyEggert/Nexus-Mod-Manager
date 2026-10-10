@@ -6,6 +6,7 @@
 //! displaced by mods, `GameRootInstall/<id>/…` + `GameRootBackup/…` the same for files deployed to
 //! the game root instead of the install root (script extenders), `.staging/` scratch, `state.json`, and `deploy.journal` while a deploy
 //! is in flight (reconciled against the filesystem on the next `open` if we died mid-deploy).
+//! `OrphanedBackup/` holds stale backups `reconcile` set aside (the game replaced the file since).
 //! `.pending/<id>` marks a mod being installed or removed; only marked mods' files are ever deleted
 //! (see `resolve_pending`), so a lost or stale `state.json` can't wipe the library.
 
@@ -39,9 +40,9 @@ pub struct ModEntry {
 }
 
 impl ModEntry {
-    /// (path, is game-root) for every file this mod deploys right now.
-    fn deployable(&self) -> impl Iterator<Item = (&String, bool)> {
-        let root = if self.game_root { &self.root_files[..] } else { &[] };
+    /// (path, is game-root) for every file this mod deploys right now, or could (`all`).
+    fn deployable(&self, all: bool) -> impl Iterator<Item = (&String, bool)> {
+        let root = if all || self.game_root { &self.root_files[..] } else { &[] };
         self.files.iter().map(|f| (f, false)).chain(root.iter().map(|f| (f, true)))
     }
 }
@@ -108,6 +109,17 @@ pub enum LinkMode {
     Symlink,
     /// Always copy: survives the mods folder moving or being deleted.
     Copy,
+}
+
+/// What `repair` couldn't settle on its own; left in place for the user to review.
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct RepairReport {
+    /// Stale backups set aside under `OrphanedBackup/` (relative to the mods folder): the game
+    /// replaced the file after the mod displaced it.
+    pub orphaned_backups: Vec<String>,
+    /// Game paths holding an unrecorded copy of a mod's file. Could be a mod copy whose record
+    /// was lost, or a game file with the same bytes; kept since deleting the latter loses it.
+    pub untracked: Vec<String>,
 }
 
 /// Extracted archive waiting to be installed.
@@ -258,9 +270,35 @@ fn move_file(src: &Path, dst: &Path) -> R<()> {
 /// Lower-cased path -> (deployed before, deployed after) for every path a deploy changes.
 type Journal = BTreeMap<String, (Option<Deployed>, Option<Deployed>)>;
 
+/// Key -> (link that locates the path on disk, links that may be live there, likeliest first).
+type Candidates = BTreeMap<String, (Deployed, Vec<Deployed>)>;
+
+fn candidates(journal: &Journal) -> Candidates {
+    let pick = |(old, new): &(Option<Deployed>, Option<Deployed>)| {
+        let all: Vec<Deployed> = [new, old].into_iter().flatten().cloned().collect();
+        (all[0].clone(), all)
+    };
+    journal.iter().map(|(k, v)| (k.clone(), pick(v))).collect()
+}
+
 // ponytail: byte compare, not inode; a game file identical to a mod's reads as deployed.
 fn same_content(a: &Path, b: &Path) -> bool {
     matches!((fs::metadata(a), fs::metadata(b)), (Ok(x), Ok(y)) if x.len() == y.len()) && fs::read(a).ok() == fs::read(b).ok()
+}
+
+/// `link` is a hardlink or symlink to `src`.
+// ponytail: Windows hardlinks read as distinct (no stable file-index API); repair then leaves them untracked.
+fn same_file(src: &Path, link: &Path) -> bool {
+    if fs::read_link(link).is_ok_and(|t| t == src) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        matches!((fs::metadata(src), fs::symlink_metadata(link)), (Ok(a), Ok(b)) if (a.dev(), a.ino()) == (b.dev(), b.ino()))
+    }
+    #[cfg(not(unix))]
+    false
 }
 
 #[cfg(test)]
@@ -328,8 +366,13 @@ impl Manager {
         let mut m = Self { game, game_path, mods_dir, state, task: Task::default() };
         if let Ok(s) = fs::read_to_string(m.journal_path()) {
             tracing::warn!(mods_dir = %m.mods_dir.display(), "unfinished deploy found; recovering");
-            let journal = serde_json::from_str(&s).map_err(|e| format!("unreadable deploy.journal ({e}); delete it to continue"))?;
-            m.reconcile(&journal)?;
+            match serde_json::from_str(&s) {
+                Ok(journal) => m.reconcile(&candidates(&journal))?,
+                Err(e) => {
+                    tracing::warn!("unreadable deploy.journal ({e}); scanning the game instead");
+                    m.scan()?;
+                }
+            }
             m.finish()?;
             // The kill interrupted a change (or its rollback) before state was saved: deploy the
             // saved intent so the game holds all of it or none, not half a mod until a manual redeploy.
@@ -634,9 +677,14 @@ impl Manager {
 
     /// Every (key, link) active mods want, in load order; later entries win a key.
     fn wanted(&self) -> Vec<(String, Deployed)> {
+        self.links(false)
+    }
+
+    /// Links of active mods, or of every mod and file (`all`), in load order.
+    fn links(&self, all: bool) -> Vec<(String, Deployed)> {
         let mut out = vec![];
-        for (i, m) in self.state.mods.iter().enumerate().filter(|(_, m)| m.active) {
-            for (f, game_root) in m.deployable() {
+        for (i, m) in self.state.mods.iter().enumerate().filter(|(_, m)| all || m.active) {
+            for (f, game_root) in m.deployable(all) {
                 let path = adjust::resolve(f, i);
                 let src = (path != *f).then(|| f.clone());
                 out.push((key(&path, game_root), Deployed { path, mod_id: m.id.clone(), game_root, src }));
@@ -706,7 +754,7 @@ impl Manager {
             let _ = fs::remove_file(self.game_path.join("Binaries/SETTINGS/GCMODSETTINGS.MXML"));
         }
         if result.is_err() {
-            self.reconcile(&journal)?;
+            self.reconcile(&candidates(&journal))?;
         }
         self.finish()?;
         result
@@ -767,15 +815,15 @@ impl Manager {
         Ok(())
     }
 
-    /// Rebuild `deployed` for journaled paths from what is actually on disk, and put back
+    /// Rebuild `deployed` for the given paths from what is actually on disk, and put back
     /// game files stranded in Backup. Converges any partial `apply`; the next deploy redoes the rest.
-    fn reconcile(&mut self, journal: &Journal) -> R<()> {
-        for (key, (old, new)) in journal {
-            let p = self.place(new.as_ref().or(old.as_ref()).unwrap());
-            for t in [&p.target, &p.saved] {
+    fn reconcile(&mut self, cands: &Candidates) -> R<()> {
+        for (key, (at, links)) in cands {
+            let Place { target, saved, backup, .. } = self.place(at);
+            for t in [&target, &saved] {
                 let _ = fs::remove_file(tmp_path(t));
             }
-            let live = [new, old].into_iter().flatten().find(|d| {
+            let live = links.iter().find(|d| {
                 let p = self.place(d);
                 same_content(&p.src, &p.target)
             });
@@ -784,7 +832,6 @@ impl Manager {
                 continue;
             }
             self.state.deployed.remove(key);
-            let Place { target, saved, backup, .. } = self.place(new.as_ref().or(old.as_ref()).unwrap());
             if !saved.exists() {
                 continue;
             }
@@ -795,9 +842,96 @@ impl Manager {
                 // Crash inside move_file's copy fallback left two copies.
                 fs::remove_file(&saved).at(&saved)?;
                 prune(saved.parent().unwrap(), &backup);
+            } else {
+                // Not ours, not the backup: the game replaced the file (an update). Keep the live one,
+                // set the stale backup aside, or the next deploy would overwrite the live one with it.
+                // ponytail: a later orphan of the same path replaces an earlier one.
+                let aside = self.mods_dir.join("OrphanedBackup").join(rel(&saved, &self.mods_dir));
+                move_file(&saved, &aside)?;
+                prune(saved.parent().unwrap(), &backup);
+                tracing::warn!(path = %aside.display(), "stale backup set aside");
             }
         }
         Ok(())
+    }
+
+    /// Last resort for a lost or unreadable `deploy.journal`: `reconcile` every path any mod,
+    /// `deployed` or a backup knows, then redeploy the saved intent.
+    pub fn repair(&mut self) -> R<RepairReport> {
+        let report = self.scan()?;
+        self.finish()?;
+        self.deploy()?;
+        Ok(report)
+    }
+
+    fn scan(&mut self) -> R<RepairReport> {
+        // A path nothing recorded and nothing backed up may be a game file that happens to equal
+        // a mod's: count it as deployed only when it's provably a link, never by content.
+        let mut trusted: std::collections::HashSet<String> = self.state.deployed.keys().cloned().collect();
+        let backups = self.backups();
+        trusted.extend(backups.iter().map(|(g, p)| key(p, *g)));
+        let all = self.links(true);
+        let links: Vec<_> = (self.wanted().into_iter().rev().chain(self.state.deployed.clone()).chain(all.into_iter().rev()))
+            .map(|(k, d)| {
+                let p = self.place(&d);
+                let live = trusted.contains(&k) || same_file(&p.src, &p.target);
+                (k, d, live)
+            })
+            .collect();
+        let mut cands = Candidates::new();
+        let mut add = |k: String, d: Deployed, live: bool| {
+            let (_, links) = cands.entry(k).or_insert_with(|| (d.clone(), vec![]));
+            if live && !links.contains(&d) {
+                links.push(d);
+            }
+        };
+        // Likeliest first: what should win now, what we last recorded, then any mod's copy.
+        let mut untrusted = HashMap::new();
+        for (k, d, live) in links {
+            if !live {
+                untrusted.entry(k.clone()).or_insert_with(|| d.clone());
+            }
+            add(k, d, live);
+        }
+        for (game_root, path) in backups {
+            add(key(&path, game_root), Deployed { path, mod_id: String::new(), game_root, src: None }, false);
+        }
+        tracing::info!(paths = cands.len(), "scanning game against mods");
+        self.reconcile(&cands)?;
+        let orphaned_backups = files_under(&self.mods_dir.join("OrphanedBackup")).iter().map(|f| rel(f, &self.mods_dir)).collect();
+        let untracked = cands
+            .iter()
+            .filter(|(k, (_, live))| live.is_empty() && !self.state.deployed.contains_key(*k))
+            .filter_map(|(k, _)| untrusted.get(k))
+            .filter(|d| {
+                let p = self.place(d);
+                same_content(&p.src, &p.target)
+            })
+            .map(|d| rel(&self.place(d).target, &self.game_path))
+            .collect();
+        let report = RepairReport { orphaned_backups, untracked };
+        if report != RepairReport::default() {
+            tracing::warn!(?report, "repair left files for review");
+        }
+        Ok(report)
+    }
+
+    /// (is game-root, path) of every backed-up game file. Deletes copy scratch files on the way:
+    /// a backup copy in flight always still has its source.
+    fn backups(&self) -> Vec<(bool, String)> {
+        let mut out = vec![];
+        for (game_root, dir) in [(false, "Backup"), (true, "GameRootBackup")] {
+            let base = self.mods_dir.join(dir);
+            for e in walkdir::WalkDir::new(&base).into_iter().filter_map(Result::ok).filter(|e| e.file_type().is_file()) {
+                let path = rel(e.path(), &base);
+                if path.ends_with(".nmm-tmp") {
+                    let _ = fs::remove_file(e.path());
+                } else {
+                    out.push((game_root, path));
+                }
+            }
+        }
+        out
     }
 
     /// Rewrite our entries in plugins.txt; lines for plugins we don't manage are kept.
@@ -991,14 +1125,16 @@ mod tests {
     }
 
     /// Kill deploy after every possible filesystem step; reopen must leave state matching disk
-    /// and lose no game file, and a follow-up deploy must still converge.
+    /// and lose no game file, and a follow-up deploy must still converge. Repeated with the
+    /// journal garbled, so recovery falls back to scanning the game.
     #[test]
     fn crash_mid_deploy_recovers() {
         // (active before, sky.dds before, active after, sky.dds after)
         let cases: [(&[&str], &str, &[&str], &str); 3] =
             [(&["ModA"], "A", &["ModB"], "B"), (&["ModA"], "A", &[], "vanilla"), (&[], "vanilla", &["ModA"], "A")];
         // Copy mode exercises kills between a copy's tmp write and its rename.
-        for (mode, (before, was, after, want)) in [LinkMode::Auto, LinkMode::Copy].into_iter().flat_map(|l| cases.map(|c| (l, c))) {
+        let runs = [(LinkMode::Auto, false), (LinkMode::Copy, false), (LinkMode::Auto, true), (LinkMode::Copy, true)];
+        for ((mode, garble), (before, was, after, want)) in runs.into_iter().flat_map(|r| cases.map(|c| (r, c))) {
             let mut crashes = 0;
             for n in 0.. {
                 let t = tempfile::tempdir().unwrap();
@@ -1026,13 +1162,18 @@ mod tests {
                 CRASH_AFTER.with(|c| c.set(usize::MAX));
                 let (game, game_path, mods_dir) = (m.game.clone(), m.game_path.clone(), m.mods_dir.clone());
                 drop(m);
+                if garble && mods_dir.join("deploy.journal").exists() {
+                    fs::write(mods_dir.join("deploy.journal"), "{\"textures/sky.d").unwrap();
+                }
 
                 let mut m = Manager::open(game, game_path, mods_dir).unwrap();
                 assert!(!m.journal_path().exists());
                 // Reopen finishes the job: the game holds the saved intent, all of it.
                 assert!(m.in_sync(), "{mode:?} n={n}");
                 assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), if crashed { was } else { want }, "{mode:?} n={n}");
-                assert_eq!(data.join("A.esp").exists(), (if crashed { before } else { after }).contains(&"ModA"), "{mode:?} n={n}");
+                // A lost journal can't tell a fresh copy-mode A.esp from a game file: it's kept, untracked.
+                let stray_esp = garble && mode == LinkMode::Copy && data.join("A.esp").exists() && !m.state.deployed.contains_key("a.esp");
+                assert_eq!(data.join("A.esp").exists(), stray_esp || (if crashed { before } else { after }).contains(&"ModA"), "{mode:?} n={n}");
                 let strays = walkdir::WalkDir::new(t.path()).into_iter().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().ends_with(".nmm-tmp")).count();
                 assert_eq!(strays, 0, "{mode:?} n={n}");
                 for d in m.state.deployed.values() {
@@ -1050,7 +1191,8 @@ mod tests {
                 set(&mut m, &[]);
                 m.deploy().unwrap();
                 assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla", "n={n}");
-                assert!(!data.join("A.esp").exists() && !m.mods_dir.join("Backup/textures/sky.dds").exists());
+                assert!(stray_esp || !data.join("A.esp").exists());
+                assert!(!m.mods_dir.join("Backup/textures/sky.dds").exists());
 
                 if !crashed {
                     break;
@@ -1059,6 +1201,60 @@ mod tests {
             }
             assert!(crashes > 0);
         }
+    }
+
+    /// Journal and deploy records both lost: repair rebuilds them from disk, puts back a stranded
+    /// game file, flags a backup the game has moved past, and doesn't claim an untouched game
+    /// file just because an inactive mod ships the same bytes.
+    #[test]
+    fn repair_rebuilds_from_disk() {
+        let t = tempfile::tempdir().unwrap();
+        let data = t.path().join("game/Data");
+        fs::create_dir_all(data.join("textures")).unwrap();
+        fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
+        fs::write(data.join("textures/same.dds"), "same").unwrap();
+        fs::write(data.join("textures/patched.dds"), "v1").unwrap();
+        let mut game = crate::game::find("Fallout4").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
+        for (name, files) in [
+            ("ModA", &[("textures/sky.dds", "A"), ("textures/a.dds", "a"), ("textures/patched.dds", "A")][..]),
+            ("ModB", &[("textures/same.dds", "same"), ("textures/gone.dds", "g")]),
+        ] {
+            let z = t.path().join(format!("{name}.zip"));
+            zip(&z, files);
+            m.install(m.stage(&z).unwrap(), None).unwrap();
+        }
+        // ModB off: same.dds is the game's own file again, byte-identical to ModB's copy.
+        m.set_active("ModB", false).unwrap();
+        let backup = m.mods_dir.join("Backup/textures");
+        fs::write(backup.join("gone.dds"), "game file").unwrap(); // stranded: target empty
+        fs::remove_file(data.join("textures/patched.dds")).unwrap(); // game updated the file the mod displaced
+        fs::write(data.join("textures/patched.dds"), "v2").unwrap();
+        let want = m.state.deployed.clone();
+        m.state.deployed.clear();
+        m.save().unwrap();
+
+        let mut m = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        let report = m.repair().unwrap();
+        assert_eq!(report.orphaned_backups, ["OrphanedBackup/Backup/textures/patched.dds"]);
+        assert_eq!(report.untracked, ["Data/textures/same.dds"]);
+        assert!(m.in_sync());
+        assert_eq!(m.state.deployed, want);
+        let read = |p: &Path| fs::read_to_string(p).unwrap();
+        assert_eq!(read(&data.join("textures/sky.dds")), "A");
+        assert_eq!(read(&backup.join("sky.dds")), "vanilla");
+        assert_eq!(read(&data.join("textures/gone.dds")), "game file");
+        assert_eq!(read(&data.join("textures/same.dds")), "same");
+        assert_eq!(read(&data.join("textures/patched.dds")), "A");
+        assert_eq!(read(&backup.join("patched.dds")), "v2", "updated game file is the backup now");
+
+        m.set_active("ModA", false).unwrap();
+        assert_eq!(read(&data.join("textures/sky.dds")), "vanilla");
+        assert_eq!(read(&data.join("textures/patched.dds")), "v2");
+        assert!(!data.join("textures/a.dds").exists() && !backup.exists());
+        assert!(data.join("textures/same.dds").exists() && data.join("textures/gone.dds").exists());
     }
 
     #[test]

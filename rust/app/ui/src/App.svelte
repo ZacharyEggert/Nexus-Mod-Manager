@@ -51,6 +51,18 @@
     reload();
   }
 
+  /** Rebuild deploy records from the game folder; reports what it left for review. */
+  async function repair() {
+    if (view.kind !== 'game') return;
+    const r = await runTask('Scanning game and repairing', api.repair(view.mode)).catch(() => null);
+    const notes = [
+      r?.orphaned_backups.length && `${r.orphaned_backups.length} outdated backups moved to OrphanedBackup in the mods folder`,
+      r?.untracked.length && `${r.untracked.length} files match a mod but weren’t recorded, so were left in place: ${r.untracked.join(', ')}`,
+    ].filter(Boolean);
+    if (notes.length) status(`Repair done. ${notes.join('. ')}.`);
+    reload();
+  }
+
   async function install(path: string) {
     if (view.kind !== 'game' || !cur?.game_path) return status('Pick and set up a game first', true);
     const mode = view.mode;
@@ -133,7 +145,7 @@
       {#if view.setup}
         {#key cur.mode_id}<Setup game={cur} onsaved={() => select(cur.mode_id)} />{/key}
       {:else if lib}
-        <Library {lib} {op} />
+        <Library {lib} {op} {repair} />
       {/if}
     {/if}
   </div>

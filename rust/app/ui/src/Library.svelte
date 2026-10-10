@@ -3,7 +3,7 @@
   import type * as api from './lib/api';
   import { LINK_MODES } from './lib/ui.svelte';
 
-  let { lib, op }: { lib: api.Library; op: (label: string, o: api.Op) => void } = $props();
+  let { lib, op, repair }: { lib: api.Library; op: (label: string, o: api.Op) => void; repair: () => void } = $props();
 
   const order = $derived(Object.fromEntries(lib.mods.map((m, i) => [m.id, i])));
   const name = (id: string) => lib.mods[order[id]]?.name ?? id;
@@ -31,6 +31,8 @@
     onchange={(e) => op('Relinking mod files', { op: 'set_link_mode', mode: e.currentTarget.value as api.LinkMode })}>
     {#each LINK_MODES as [v, t]}<option value={v}>{t}</option>{/each}
   </select>. Lower in the list wins file conflicts.
+  <button class="btn" title="Check the game folder against your mods and fix what’s out of step, e.g. after a crash or a deleted deploy.journal"
+    onclick={repair}>Scan &amp; repair</button>
 </p>
 {#if !lib.same_volume && lib.link_mode !== 'copy'}<p class="conf">{crossDrive}</p>{/if}
 {#if !lib.in_sync}

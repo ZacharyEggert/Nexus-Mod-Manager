@@ -432,6 +432,18 @@ fn run_op(m: &mut Manager, op: Op) -> R<()> {
     }
 }
 
+/// Task: rebuild deploy records from the game folder, then redeploy (when the journal was lost).
+#[tauri::command]
+fn repair(app: AppHandle, id: String, mode: String) {
+    spawn(&app, id, mode.clone(), "repair".into(), move |app, task| {
+        let mut m = manager(app, &mode)?;
+        m.task = task;
+        let mut report = None;
+        m.transact(|m| m.repair().map(|r| report = Some(r)))?;
+        Ok(report.unwrap_or_default())
+    });
+}
+
 #[tauri::command]
 async fn launch(app: AppHandle, mode: String) -> R<()> {
     // read() waits for this game's tasks, so the game never starts mid-deploy.
@@ -492,7 +504,7 @@ fn main() {
         .manage(App::default())
         .invoke_handler(tauri::generate_handler![
             games, configure, library, pick_archive, pick_folder, stage, fomod_eval, fomod_image, fomod_install,
-            fomod_cancel, apply, launch, cancel, settings, save_settings
+            fomod_cancel, apply, repair, launch, cancel, settings, save_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

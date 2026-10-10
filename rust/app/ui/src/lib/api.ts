@@ -38,6 +38,13 @@ export interface Library {
   in_sync: boolean;
 }
 
+export interface RepairReport {
+  /** Stale backups set aside, relative to the mods folder. */
+  orphaned_backups: string[];
+  /** Game paths holding an unrecorded copy of a mod file (or a game file with the same bytes). */
+  untracked: string[];
+}
+
 export interface Settings {
   mods_root: string | null;
   link_mode: LinkMode;
@@ -137,6 +144,7 @@ const call = <T>(cmd: string, args: Record<string, unknown>): TaskCall<T> => ({ 
 export const stage = (mode: string, archive: string) => call<StageResult>('stage', { mode, archive });
 export const fomodInstall = (token: string, sel: Selection) => call<void>('fomod_install', { token, sel });
 export const apply = (mode: string, op: Op) => call<void>('apply', { mode, op });
+export const repair = (mode: string) => call<RepairReport>('repair', { mode });
 
 /** What a task rejects with when cancelled. */
 export const CANCELLED = 'cancelled';
