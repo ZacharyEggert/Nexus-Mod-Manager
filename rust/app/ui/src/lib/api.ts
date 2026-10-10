@@ -72,6 +72,8 @@ export interface Library {
   uses_plugins: boolean;
   /** LOOT can sort its plugins. */
   loot: boolean;
+  /** Archive invalidation on/off; null for games that don't need it. */
+  archive_invalidation: boolean | null;
 }
 
 export interface LootPreview {
@@ -232,7 +234,8 @@ export type Op =
   | { op: 'save_profile'; name: string }
   | { op: 'load_profile'; name: string }
   | { op: 'delete_profile'; name: string }
-  | { op: 'redeploy' };
+  | { op: 'redeploy' }
+  | { op: 'set_archive_invalidation'; on: boolean };
 
 // ---------- plain commands ----------
 

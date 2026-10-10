@@ -4,6 +4,8 @@ pub mod discover;
 pub mod download;
 pub mod fomod;
 pub mod game;
+pub mod ini;
+pub mod invalidation;
 pub mod loot;
 pub mod manager;
 pub mod nexus;

@@ -2,6 +2,7 @@
 
 use nmm_core::download::{self, Download, Downloads};
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
+use nmm_core::invalidation::ArchiveInvalidation;
 use nmm_core::manager::{LinkMode, Manager, ModEntry, PluginRow, Staged};
 use nmm_core::nexus::{self, sso, User};
 use nmm_core::plugins::Plugin;
@@ -568,6 +569,8 @@ struct Library {
     uses_plugins: bool,
     /// LOOT can sort its plugins.
     loot: bool,
+    /// Archive invalidation on/off; None for games that don't need it.
+    archive_invalidation: Option<bool>,
 }
 
 #[tauri::command]
@@ -585,6 +588,8 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
         nexus_checked: m.state.nexus_checked,
         uses_plugins: nmm_core::plugins::Policy::new(&m.game, &m.game_path).is_some(),
         loot: nmm_core::loot::supported(&m.game.mode_id),
+        archive_invalidation: ArchiveInvalidation::new(&m.game, &m.game_path)
+            .map(|a| a.is_active()),
         mods: m.state.mods,
     })
 }
@@ -873,6 +878,7 @@ enum Op {
     LoadProfile { name: String },
     DeleteProfile { name: String },
     Redeploy,
+    SetArchiveInvalidation { on: bool },
 }
 
 /// Task: change intent and redeploy; a cancel rolls back to the previous intent.
@@ -902,6 +908,9 @@ fn run_op(m: &mut Manager, op: Op) -> R<()> {
         Op::LoadProfile { name } => m.load_profile(&name),
         Op::DeleteProfile { name } => m.delete_profile(&name),
         Op::Redeploy => m.deploy(),
+        Op::SetArchiveInvalidation { on } => ArchiveInvalidation::new(&m.game, &m.game_path)
+            .ok_or("this game doesn't use archive invalidation")?
+            .set(on),
     }
 }
 

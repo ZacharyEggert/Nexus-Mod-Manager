@@ -34,6 +34,16 @@
   <button class="btn" title="Check the game folder against your mods and fix what’s out of step, e.g. after a crash or a deleted deploy.journal"
     onclick={() => repair()}>Scan &amp; repair</button>
 </p>
+{#if lib.archive_invalidation !== null}
+  <!-- keyed: a refused change leaves the value as it was, and only a re-render resets the box -->
+  {#key lib}<p class="muted">
+    <label title="Makes the game use loose mod files (textures, meshes) instead of the same files inside its own BSA archives. Edits the game's INI.">
+      <input type="checkbox" checked={lib.archive_invalidation}
+        onchange={(e) => op(`${e.currentTarget.checked ? 'Enabling' : 'Disabling'} archive invalidation`, { op: 'set_archive_invalidation', on: e.currentTarget.checked })} />
+      Archive invalidation (loose mod files override the game’s BSAs)
+    </label>
+  </p>{/key}
+{/if}
 {#if !lib.same_volume && lib.link_mode !== 'copy'}<p class="conf">{crossDrive}</p>{/if}
 {#if lib.strays.length}
   <p class="conf">

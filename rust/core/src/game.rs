@@ -67,6 +67,14 @@ pub struct GameDef {
 #[serde(rename_all = "camelCase")]
 pub struct GamebryoDef {
     pub plugins_file_path: Option<String>,
+    /// `oblivion`, `fallout3`, `falloutnv`: which archive invalidation the game needs.
+    pub archive_invalidation_profile: Option<String>,
+    /// `{UserGameData}`: the game's My Games folder.
+    pub user_game_data_path: Option<String>,
+    pub ini_file_path: Option<String>,
+    /// Other INI files by C# settings key (`FODefaultIniPath`).
+    #[serde(default)]
+    pub additional_settings_files: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -264,6 +272,20 @@ impl GameDef {
             template,
             game_path,
             self.windows_user_dir(game_path).as_deref(),
+        )
+    }
+
+    /// `{UserGameData}`-aware `path` for gamebryo settings (`{UserGameData}\Oblivion.ini`).
+    pub fn settings_path(&self, template: &str, game_path: &Path) -> PathBuf {
+        let user = self
+            .gamebryo
+            .as_ref()
+            .and_then(|g| g.user_game_data_path.as_deref())
+            .map(|u| self.path(u, game_path))
+            .unwrap_or_else(|| game_path.to_path_buf());
+        self.path(
+            &template.replace("{UserGameData}", &user.to_string_lossy()),
+            game_path,
         )
     }
 
