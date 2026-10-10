@@ -227,6 +227,37 @@ fn crash_point() {
     });
 }
 
+/// `base/rel`, reusing the casing of whatever already exists on disk, so `Textures/x.dds` lands
+/// in the game's `textures/` on case-sensitive volumes. Components past the first missing one
+/// keep `rel`'s casing. No-op cost on case-insensitive volumes: one stat when the path exists.
+// ponytail: read_dir per missed component, uncached; cache dir listings per deploy if it shows up in profiles.
+fn resolve_ci(base: &Path, rel: &str) -> PathBuf {
+    let exact = base.join(rel);
+    if exact.exists() {
+        return exact;
+    }
+    let mut cur = base.to_path_buf();
+    let mut parts = rel.split('/').filter(|c| !c.is_empty());
+    for part in parts.by_ref() {
+        let found = if cur.join(part).exists() {
+            Some(part.into())
+        } else {
+            fs::read_dir(&cur).ok().and_then(|rd| {
+                rd.filter_map(Result::ok).map(|e| e.file_name()).find(|n| n.to_string_lossy().eq_ignore_ascii_case(part))
+            })
+        };
+        match found {
+            Some(name) => cur.push(name),
+            None => {
+                cur.push(part);
+                break;
+            }
+        }
+    }
+    cur.extend(parts);
+    cur
+}
+
 /// Remove now-empty parent dirs up to (not including) `stop`.
 fn prune(mut dir: &Path, stop: &Path) {
     while dir != stop && dir.starts_with(stop) && fs::remove_dir(dir).is_ok() {
@@ -278,13 +309,16 @@ impl Manager {
             (self.install_root(), self.mods_dir.join("Backup"), self.virtual_dir(&d.mod_id))
         };
         let src = store.join(d.src.as_deref().unwrap_or(&d.path));
-        Place { target: root.join(&d.path), saved: backup.join(&d.path), src, root, backup }
+        let target = resolve_ci(&root, &d.path);
+        // Backup mirrors the game's casing, and is itself looked up case-insensitively.
+        let saved = resolve_ci(&backup, &rel(&target, &root));
+        Place { target, saved, src, root, backup }
     }
 
     /// fileDependency state for FOMod conditions.
     pub fn file_state(&self, name: &str) -> String {
         // ponytail: no Inactive state; a present file counts as Active.
-        if self.install_root().join(name.replace('\\', "/")).exists() { "Active" } else { "Missing" }.into()
+        if resolve_ci(&self.install_root(), &name.replace('\\', "/")).exists() { "Active" } else { "Missing" }.into()
     }
 
     // ---------- install ----------
@@ -863,6 +897,59 @@ mod tests {
         assert_eq!(reopened.state.deployed.len(), 1);
         m.remove("Alpha").unwrap();
         assert!(!mods.join("0001_Alpha").exists());
+    }
+
+    /// Needs a case-sensitive volume: Linux tmp, or on macOS point `NMM_TEST_TMPDIR` at a
+    /// "Case-sensitive APFS" disk image. Skips itself on case-insensitive volumes.
+    #[test]
+    fn deploy_folds_into_existing_casing() {
+        let t = match std::env::var_os("NMM_TEST_TMPDIR") {
+            Some(d) => tempfile::tempdir_in(d).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        fs::write(t.path().join("Probe"), "").unwrap();
+        if t.path().join("probe").exists() {
+            eprintln!("skipped: {} is case-insensitive", t.path().display());
+            return;
+        }
+        let data = t.path().join("game/Data");
+        fs::create_dir_all(data.join("textures")).unwrap();
+        fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
+        fs::write(data.join("Skyrim.esm"), "master").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
+        let names = |p: &Path| {
+            let mut v: Vec<String> = fs::read_dir(p).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+            v.sort();
+            v
+        };
+
+        let z = t.path().join("ModA.zip");
+        zip(&z, &[("Textures/SKY.dds", "A"), ("Textures/Sub/new.dds", "n"), ("skyrim.esm", "patched")]);
+        let s = m.stage(&z).unwrap();
+        m.install(s, None).unwrap();
+        assert_eq!(names(&data), ["Skyrim.esm", "textures"]);
+        assert_eq!(names(&data.join("textures")), ["Sub", "sky.dds"]);
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+        assert_eq!(fs::read_to_string(data.join("Skyrim.esm")).unwrap(), "patched");
+        assert_eq!(m.file_state("SKYRIM.ESM"), "Active");
+
+        // A second mod with yet another casing joins the same tree.
+        let z = t.path().join("ModB.zip");
+        zip(&z, &[("TEXTURES/sub/other.dds", "o")]);
+        let s = m.stage(&z).unwrap();
+        m.install(s, None).unwrap();
+        assert_eq!(names(&data.join("textures/Sub")), ["new.dds", "other.dds"]);
+
+        m.remove("ModA").unwrap();
+        m.remove("ModB").unwrap();
+        assert_eq!(names(&data), ["Skyrim.esm", "textures"]);
+        assert_eq!(names(&data.join("textures")), ["sky.dds"]);
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
+        assert_eq!(fs::read_to_string(data.join("Skyrim.esm")).unwrap(), "master");
+        assert!(!m.mods_dir.join("Backup").exists() || names(&m.mods_dir.join("Backup")).is_empty());
     }
 
     #[test]
