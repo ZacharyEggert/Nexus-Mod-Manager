@@ -3,7 +3,7 @@
 use nmm_core::download::{self, Download, Downloads};
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
 use nmm_core::invalidation::ArchiveInvalidation;
-use nmm_core::manager::{LinkMode, Manager, ModEntry, PluginRow, Staged};
+use nmm_core::manager::{ImportReport, LinkMode, Manager, ModEntry, PluginRow, Staged};
 use nmm_core::nexus::{self, sso, User};
 use nmm_core::plugins::Plugin;
 use nmm_core::{discover, game, IoContext, Task};
@@ -612,6 +612,51 @@ async fn plugins_set(app: AppHandle, mode: String, plugins: Vec<Plugin>) -> R<Ve
     .await
 }
 
+/// Save the load order to a text file the user picks; false when they cancel.
+#[tauri::command]
+async fn plugins_export(app: AppHandle, mode: String) -> R<bool> {
+    let text = blocking({
+        let (app, mode) = (app.clone(), mode.clone());
+        move || read(&app, &mode)?.export_load_order()
+    })
+    .await?;
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("Load order", &["txt"])
+        .set_file_name(format!("{mode} load order.txt"))
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).at(&path)?;
+    Ok(true)
+}
+
+/// Apply a load order from a text file the user picks; None when they cancel.
+#[tauri::command]
+async fn plugins_import(app: AppHandle, mode: String) -> R<Option<ImportReport>> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("Load order", &["txt"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    blocking(move || {
+        let text = std::fs::read(&path).at(&path)?;
+        let lock = app.state::<App>().lock(&mode);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        manager(&app, &mode)?
+            .import_load_order(&String::from_utf8_lossy(&text))
+            .map(Some)
+    })
+    .await
+}
+
 /// Task: LOOT's proposed order (refreshing a stale masterlist first); applied via `plugins_set`.
 #[tauri::command]
 fn loot_preview(app: AppHandle, id: String, mode: String) {
@@ -1179,6 +1224,8 @@ fn main() {
             library,
             plugins,
             plugins_set,
+            plugins_export,
+            plugins_import,
             loot_preview,
             pick_archive,
             pick_folder,

@@ -25,6 +25,28 @@
     preview = null;
   }
 
+  async function exportOrder() {
+    try {
+      if (await api.pluginsExport(mode)) status('Load order exported');
+    } catch (e) {
+      status(`Export failed: ${e}`, true);
+    }
+  }
+
+  async function importOrder() {
+    try {
+      const r = await api.pluginsImport(mode);
+      if (!r) return;
+      await load();
+      status(
+        `Imported ${r.imported} of ${r.total} plugins${r.unknown.length ? `; not in the game: ${r.unknown.join(', ')}` : ''}`,
+        r.unknown.length > 0,
+      );
+    } catch (e) {
+      status(`Not imported: ${e}`, true);
+    }
+  }
+
   const shown = $derived(rows.filter((r) => !filter || r.name.toLowerCase().includes(filter.toLowerCase()) || r.owner?.toLowerCase().includes(filter.toLowerCase())));
   const used = (c: api.PluginRow['class']) => rows.filter((r) => r.active && r.class === c).length;
   const sel = $derived(rows.find((r) => r.name === selected));
@@ -92,6 +114,8 @@
   <button class="btn" onclick={() => setAll(true)}>Enable all</button>
   <button class="btn" onclick={() => setAll(false)}>Disable all</button>
   {#if loot}<button class="btn" onclick={sortLoot}>Sort with LOOT</button>{/if}
+  <button class="btn" onclick={exportOrder}>Export…</button>
+  <button class="btn" onclick={importOrder}>Import…</button>
 </p>
 
 {#if preview}

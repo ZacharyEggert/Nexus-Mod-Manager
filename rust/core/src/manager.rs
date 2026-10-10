@@ -165,6 +165,17 @@ pub struct LootPreview {
     pub note: Option<String>,
 }
 
+/// Outcome of a load-order import.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportReport {
+    /// Plugins named in the source.
+    pub total: usize,
+    /// Of those, the ones found and applied.
+    pub imported: usize,
+    /// Named but not in the game.
+    pub unknown: Vec<String>,
+}
+
 /// Extracted archive waiting to be installed.
 #[derive(Debug, Clone)]
 pub struct Staged {
@@ -1508,6 +1519,78 @@ impl Manager {
         })
     }
 
+    /// Plugin order + active states as text (C# `PluginManagerVM.ExportLoadOrder`):
+    /// `GameMode=<mode>`, then `<plugin>=1|0` per line.
+    pub fn export_load_order(&self) -> R<String> {
+        let policy = plugins::Policy::new(&self.game, &self.game_path)
+            .ok_or("this game doesn't use plugins")?;
+        let mut out = format!("GameMode={}\r\n", self.game.mode_id);
+        for p in policy.read() {
+            out += &format!("{}={}\r\n", p.name, u8::from(p.active));
+        }
+        Ok(out)
+    }
+
+    /// Apply an exported load order (C# `ImportLoadOrder`): listed plugins take its order, and
+    /// its active state where given (`name` alone only moves); unlisted plugins keep their state.
+    /// Applied through `set_plugins`, so the game's rules hold and breaking changes are refused.
+    pub fn import_load_order(&self, text: &str) -> R<ImportReport> {
+        let mut mode = None;
+        let mut listed: Vec<(String, Option<bool>)> = vec![];
+        for line in text.lines().map(str::trim) {
+            if let Some(m) = line.strip_prefix("GameMode=") {
+                if mode.replace(m).is_some() {
+                    return Err("the load order has more than one game mode".into());
+                }
+                continue;
+            }
+            let (name, active) = match line.rsplit_once('=') {
+                Some((n, "1")) => (n, Some(true)),
+                Some((n, "0")) => (n, Some(false)),
+                _ => (line, None),
+            };
+            let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+            if matches!(ext.as_deref(), Some("esp" | "esm" | "esl"))
+                && !listed.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
+            {
+                listed.push((name.to_string(), active));
+            }
+        }
+        match mode {
+            None => return Err("the load order has no game mode".into()),
+            Some(m) if m != self.game.mode_id => {
+                return Err(format!("the load order is for {m}, not {}", self.game.mode_id).into())
+            }
+            _ => {}
+        }
+        if listed.is_empty() {
+            return Err("No plugins were found in the load order.".into());
+        }
+        let policy = plugins::Policy::new(&self.game, &self.game_path)
+            .ok_or("this game doesn't use plugins")?;
+        let current = policy.read();
+        let mut wanted = vec![];
+        let mut unknown = vec![];
+        for (name, active) in &listed {
+            match current.iter().find(|c| c.name.eq_ignore_ascii_case(name)) {
+                Some(c) => wanted.push(plugins::Plugin {
+                    name: c.name.clone(),
+                    active: active.unwrap_or(c.active),
+                }),
+                None => unknown.push(name.clone()),
+            }
+        }
+        if wanted.is_empty() {
+            return Err("None of the plugins in the load order are in the game.".into());
+        }
+        self.set_plugins(&wanted)?;
+        Ok(ImportReport {
+            total: listed.len(),
+            imported: wanted.len(),
+            unknown,
+        })
+    }
+
     /// Persist the plugin load order after a deploy. `added` are paths this deploy linked fresh:
     /// their plugins load last and start active (C# `IntegrateDeployedPlugins`); everything else
     /// keeps the order and state the game's files already hold.
@@ -1922,6 +2005,64 @@ mod tests {
 
         m.delete_profile("one").unwrap();
         assert!(!m.state.profile_plugins.contains_key("one"));
+    }
+
+    #[test]
+    fn load_order_export_and_import() {
+        use crate::plugins::tests::tes4;
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("Skyrim.esm"), tes4(1, &[], "")).unwrap();
+        fs::write(data.join("Lib.esm"), tes4(1, &[], "")).unwrap();
+        fs::write(data.join("Dep.esp"), tes4(0, &["Lib.esm"], "")).unwrap();
+        fs::write(data.join("A.esp"), tes4(0, &[], "")).unwrap();
+        fs::write(data.join("B.esp"), tes4(0, &[], "")).unwrap();
+        let txt = t.path().join("plugins.txt");
+        fs::write(&txt, "*Lib.esm\r\n*Dep.esp\r\nA.esp\r\n*B.esp\r\n").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let m = Manager::open(game, game_path, t.path().join("mods")).unwrap();
+        let body = || {
+            fs::read_to_string(&txt)
+                .unwrap()
+                .lines()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+
+        let exported = m.export_load_order().unwrap();
+        assert_eq!(
+            exported,
+            "GameMode=SkyrimSE\r\nSkyrim.esm=1\r\nLib.esm=1\r\nDep.esp=1\r\nA.esp=0\r\nB.esp=1\r\n"
+        );
+
+        // Listed plugins take that order and state; a bare name only moves; unknown ones are
+        // reported; unlisted ones keep their state and go last.
+        let r = m
+            .import_load_order("GameMode=SkyrimSE\n\nb.esp=0\nA.esp=1\nGone.esp=1\nDep.esp\n")
+            .unwrap();
+        assert_eq!((r.total, r.imported), (4, 3));
+        assert_eq!(r.unknown, ["Gone.esp"]);
+        assert_eq!(body(), "*Lib.esm B.esp *A.esp *Dep.esp");
+
+        // The export restores the earlier state.
+        m.import_load_order(&exported).unwrap();
+        assert_eq!(body(), "*Lib.esm *Dep.esp A.esp *B.esp");
+
+        let err = |text: &str| m.import_load_order(text).unwrap_err().to_string();
+        assert!(err("A.esp=1\n").contains("no game mode"));
+        assert!(err("GameMode=Fallout4\nA.esp=1\n").contains("Fallout4"));
+        assert!(err("GameMode=SkyrimSE\nGameMode=SkyrimSE\n").contains("more than one"));
+        assert!(err("GameMode=SkyrimSE\nreadme.txt\n").contains("No plugins"));
+        assert!(err("GameMode=SkyrimSE\nX.esp=1\n").contains("None of the plugins"));
+        // Breaking the load order is refused as with any other change.
+        let before = body();
+        assert!(err("GameMode=SkyrimSE\nLib.esm=0\n").contains("Dep.esp"));
+        assert_eq!(body(), before);
     }
 
     #[test]

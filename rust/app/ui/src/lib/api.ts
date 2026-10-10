@@ -246,6 +246,15 @@ export const library = (mode: string) => invoke<Library>('library', { mode });
 export const plugins = (mode: string) => invoke<PluginRow[]>('plugins', { mode });
 /** Refused with the reasons when the change would break the load order. */
 export const pluginsSet = (mode: string, plugins: Plugin[]) => invoke<PluginRow[]>('plugins_set', { mode, plugins });
+/** Save the load order to a file the user picks; false when cancelled. */
+export const pluginsExport = (mode: string) => invoke<boolean>('plugins_export', { mode });
+export interface ImportReport {
+  total: number;
+  imported: number;
+  unknown: string[];
+}
+/** Apply a load order file the user picks; null when cancelled. */
+export const pluginsImport = (mode: string) => invoke<ImportReport | null>('plugins_import', { mode });
 export const pickArchive = () => invoke<string | null>('pick_archive');
 export const pickFolder = () => invoke<string | null>('pick_folder');
 export const fomodEval = (token: string, sel: Selection) => invoke<Eval>('fomod_eval', { token, sel });
