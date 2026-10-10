@@ -3,14 +3,18 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-macro_rules! defs {
+/// Bundled game.json + Categories.xml for each data-driven mode, index-aligned.
+macro_rules! games {
     ($($id:literal),*) => {
-        &[$(include_str!(concat!("../../../Game Modes/Definitions/", $id, "/game.json"))),*]
+        const DEFINITIONS: &[&str] =
+            &[$(include_str!(concat!("../../../Game Modes/Definitions/", $id, "/game.json"))),*];
+        const CATEGORIES: &[&str] =
+            &[$(include_str!(concat!("../../../Game Modes/Definitions/", $id, "/Categories.xml"))),*];
     };
 }
 
 // ponytail: only the 17 data-driven modes; the C#-coded ones (BG3, DarkSouls, ...) need a game.json first.
-const DEFINITIONS: &[&str] = defs!(
+games!(
     "Cyberpunk2077",
     "Fallout3",
     "Fallout4",
@@ -235,6 +239,35 @@ impl GameDef {
     }
 }
 
+/// Nexus categories shipped with the mode (C# `Categories.xml`), used until the API's are fetched.
+/// "Unassigned" (id 0) is left out: no category is `None`.
+pub fn default_categories(mode_id: &str) -> Vec<crate::nexus::Category> {
+    let Some(i) = all()
+        .iter()
+        .position(|g| g.mode_id.eq_ignore_ascii_case(mode_id))
+    else {
+        return vec![];
+    };
+    let xml = CATEGORIES[i].trim_start_matches('\u{feff}');
+    let doc = roxmltree::Document::parse(xml).expect("bundled Categories.xml is valid");
+    doc.descendants()
+        .filter(|n| n.has_tag_name("category"))
+        .filter_map(|n| {
+            let id = n.attribute("ID")?.parse().ok().filter(|&id| id > 0)?;
+            let name = n
+                .children()
+                .find(|c| c.has_tag_name("name"))
+                .and_then(|c| c.text())
+                .or(n.attribute("path"))?;
+            Some(crate::nexus::Category {
+                id,
+                name: name.trim().into(),
+                parent: None,
+            })
+        })
+        .collect()
+}
+
 /// Canonical Nexus domain for a mode id or legacy domain, per C# `GameDomainTranslator`.
 pub fn nexus_domain(name: &str) -> String {
     match name.to_ascii_lowercase().as_str() {
@@ -280,6 +313,17 @@ mod tests {
         );
         assert_eq!(super::modes_for_domain("NewVegas"), ["FalloutNV"]);
         assert!(super::modes_for_domain("morrowind").is_empty());
+        // Every bundled Categories.xml parses; SkyrimSE has the categories Nexus uses (42 = User Interface).
+        for g in &all {
+            let _ = super::default_categories(&g.mode_id);
+        }
+        let cats = super::default_categories("SkyrimSE");
+        assert!(
+            cats.iter()
+                .any(|c| c.id == 42 && c.name == "User Interface"),
+            "{cats:?}"
+        );
+        assert!(cats.iter().all(|c| c.id != 0));
     }
 
     #[cfg(not(windows))]

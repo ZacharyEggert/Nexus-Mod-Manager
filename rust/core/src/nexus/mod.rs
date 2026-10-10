@@ -5,6 +5,7 @@ mod graphql;
 pub mod link;
 mod rest;
 pub mod sso;
+pub mod updates;
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};

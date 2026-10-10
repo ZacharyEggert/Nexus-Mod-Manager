@@ -66,10 +66,10 @@
     reload();
   }
 
-  async function install(path: string) {
+  async function install(path: string, download: string | null = null) {
     if (view.kind !== 'game' || !cur?.game_path) return status('Pick and set up a game first', true);
     const mode = view.mode;
-    const res = await runTask(`Installing ${path.split(/[\\/]/).pop()}`, api.stage(mode, path)).catch(() => null);
+    const res = await runTask(`Installing ${path.split(/[\\/]/).pop()}`, api.stage(mode, path, download)).catch(() => null);
     if (res?.token && res.fomod) {
       const { token, fomod: cfg } = res;
       const sel = await new Promise<api.Selection | null>((finish) => (wizard = { token, cfg, finish }));
@@ -127,10 +127,25 @@
   /** Install a finished download into its game. */
   async function installDownload(d: api.Download) {
     await select(d.mode);
-    if (view.kind === 'game' && !view.setup) install(d.path);
+    if (view.kind === 'game' && !view.setup) install(d.path, d.id);
+  }
+
+  async function checkUpdates() {
+    if (view.kind !== 'game') return;
+    const r = await runTask('Checking Nexus for updates', api.nexusCheck(view.mode)).catch(() => null);
+    if (r) {
+      const parts = [
+        r.identified && `${count(r.identified, 'mod')} matched on Nexus`,
+        r.updates.length ? `updates for ${r.updates.join(', ')}` : 'no updates',
+        r.errors.length && `${count(r.errors.length, 'problem')}: ${r.errors.join('; ')}`,
+      ].filter(Boolean);
+      status(parts.join('. ') + '.', r.errors.length > 0);
+    }
+    reload();
   }
 
   loadGames().then(handleLinks);
+  api.onLibraryChanged((mode) => mode === curMode && reload());
   api.onLinks(handleLinks);
   getCurrentWebview().onDragDropEvent(async (e) => {
     if (e.payload.type !== 'drop') return;
@@ -168,6 +183,7 @@
       <button class="btn" onclick={saveProfile}>Save</button>
       <button class="btn" onclick={() => { if (profile) op(`Deleting profile ${profile}`, { op: 'delete_profile', name: profile }); profile = ''; }}>Delete</button>
       <button class="btn" onclick={() => view.kind === 'game' && (view = { ...view, setup: true })}>Settings</button>
+      <button class="btn" onclick={checkUpdates}>Check for updates</button>
       <button class="btn" onclick={launch}>Launch</button>
     {/if}
   </div>

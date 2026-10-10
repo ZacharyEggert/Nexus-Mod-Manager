@@ -37,6 +37,9 @@ pub struct ModEntry {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub game_root: bool,
     pub active: bool,
+    /// Where it came from on Nexus, once known (download, or md5 match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nexus: Option<crate::nexus::updates::NexusMeta>,
 }
 
 impl ModEntry {
@@ -103,6 +106,9 @@ pub struct State {
     /// Mode the current links were made with; a mismatch relinks everything on the next deploy.
     #[serde(default)]
     pub deployed_mode: LinkMode,
+    /// Unix seconds of the last Nexus update check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nexus_checked: Option<u64>,
 }
 
 /// How deploy places a mod file in the game. Every mode falls back to a copy when its link
@@ -141,6 +147,8 @@ pub struct Staged {
     pub dir: PathBuf,
     /// `Some((base, config))` when the archive ships a FOMod installer.
     pub fomod: Option<(PathBuf, ModuleConfig)>,
+    /// Nexus origin to record on the installed mod.
+    pub nexus: Option<crate::nexus::updates::NexusMeta>,
 }
 
 pub struct Manager {
@@ -589,6 +597,7 @@ impl Manager {
                 archive: archive.to_path_buf(),
                 dir,
                 fomod,
+                nexus: None,
             }),
             Err(e) => {
                 let _ = fs::remove_dir_all(&dir);
@@ -725,6 +734,7 @@ impl Manager {
             root_files,
             game_root: game_root || profile_root,
             active: true,
+            nexus: staged.nexus,
         });
         self.deploy()?;
         self.resolve_pending()
@@ -1143,6 +1153,7 @@ impl Manager {
                 root_files,
                 game_root: false,
                 active: false,
+                nexus: None,
             });
         }
         let report = self.scan()?;

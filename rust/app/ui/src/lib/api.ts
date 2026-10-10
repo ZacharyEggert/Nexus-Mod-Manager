@@ -28,6 +28,29 @@ export interface ModEntry {
   /** Omitted when false. */
   game_root?: boolean;
   active: boolean;
+  /** Omitted until known (download, or md5 match). */
+  nexus?: NexusMeta;
+}
+
+export interface NexusMeta {
+  domain: string;
+  mod_id: number;
+  file_id: number;
+  mod_name: string;
+  file_name: string;
+  version: string;
+  author: string;
+  category_id: number | null;
+  /** Newer file in the update chain, from the last check. */
+  update?: { file_id: number; name: string; version: string };
+}
+
+export interface CheckReport {
+  identified: number;
+  checked: number;
+  /** Names of mods with an update available. */
+  updates: string[];
+  errors: string[];
 }
 
 export interface Library {
@@ -41,6 +64,10 @@ export interface Library {
   in_sync: boolean;
   /** Stored mod folders missing from the list; `adopt` re-adds them. */
   strays: string[];
+  /** Nexus category id -> name. */
+  categories: Record<string, string>;
+  /** Unix seconds of the last Nexus update check. */
+  nexus_checked: number | null;
 }
 
 export interface RepairReport {
@@ -183,6 +210,10 @@ export const saveSettings = (settings: Settings) => invoke<void>('save_settings'
 export const nexusAccount = () => invoke<Account>('nexus_account');
 export const nexusSetKey = (key: string) => invoke<NexusUser>('nexus_set_key', { key });
 export const nexusLogout = () => invoke<void>('nexus_logout');
+export const openNexus = (domain: string, modId: number, fileId: number | null = null) =>
+  invoke<void>('open_nexus', { domain, modId, fileId });
+/** A background update check changed a game's library. */
+export const onLibraryChanged = (fn: (mode: string) => void) => listen<string>('library-changed', (e) => fn(e.payload));
 export const takeLinks = () => invoke<LinkEvent[]>('take_links');
 export const downloads = () => invoke<Download[]>('downloads');
 export const downloadAdd = (mode: string, url: string) => invoke<string>('download_add', { mode, url });
@@ -217,7 +248,10 @@ export interface TaskCall<T> {
 }
 const call = <T>(cmd: string, args: Record<string, unknown>): TaskCall<T> => ({ cmd, args });
 
-export const stage = (mode: string, archive: string) => call<StageResult>('stage', { mode, archive });
+/** `download`: id of the finished download the archive came from (records its Nexus origin). */
+export const stage = (mode: string, archive: string, download: string | null = null) =>
+  call<StageResult>('stage', { mode, archive, download });
+export const nexusCheck = (mode: string) => call<CheckReport>('nexus_check', { mode });
 export const fomodInstall = (token: string, sel: Selection) => call<void>('fomod_install', { token, sel });
 export const apply = (mode: string, op: Op) => call<void>('apply', { mode, op });
 export const repair = (mode: string) => call<RepairReport>('repair', { mode });

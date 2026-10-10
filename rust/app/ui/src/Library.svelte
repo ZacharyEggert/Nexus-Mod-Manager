@@ -1,6 +1,6 @@
 <script lang="ts">
   // Installed mods for one game. Every change goes through `op`, which runs it as a task and reloads.
-  import type * as api from './lib/api';
+  import * as api from './lib/api';
   import { LINK_MODES } from './lib/ui.svelte';
 
   let { lib, op, repair }: { lib: api.Library; op: (label: string, o: api.Op) => void; repair: (adopt?: boolean) => void } = $props();
@@ -62,7 +62,22 @@
             <input type="checkbox" checked={m.active} aria-label="Enable {m.name}"
               onchange={(e) => op(`${e.currentTarget.checked ? 'Enabling' : 'Disabling'} ${m.name}`, { op: 'set_active', id: m.id, active: e.currentTarget.checked })} />
           </td>
-          <td>{m.name}{#if conf}<div class="conf">{conf}</div>{/if}</td>
+          <td>
+            {m.name}
+            {#if m.nexus}
+              {@const n = m.nexus}
+              <div class="muted">
+                {n.version && `v${n.version}`}{n.author && ` · ${n.author}`}{n.category_id && lib.categories[n.category_id] ? ` · ${lib.categories[n.category_id]}` : ''}
+                <button class="link" title="Open on nexusmods.com" onclick={() => api.openNexus(n.domain, n.mod_id)}>Nexus</button>
+              </div>
+              {#if n.update}
+                <button class="badge" title="Open the new file on nexusmods.com" onclick={() => api.openNexus(n.domain, n.mod_id, n.update!.file_id)}>
+                  Update available: {n.update.name} {n.update.version}
+                </button>
+              {/if}
+            {/if}
+            {#if conf}<div class="conf">{conf}</div>{/if}
+          </td>
           <td class="muted">
             {m.files.length + (m.game_root ? roots.length : 0)} files
             {#if roots.length}

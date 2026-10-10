@@ -559,6 +559,10 @@ struct Library {
     in_sync: bool,
     /// Stored mod folders missing from the list (state.json lost); `adopt` re-adds them.
     strays: Vec<String>,
+    /// Nexus category id -> name.
+    categories: BTreeMap<u64, String>,
+    /// Unix seconds of the last Nexus update check.
+    nexus_checked: Option<u64>,
 }
 
 #[tauri::command]
@@ -572,8 +576,133 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
         link_mode: m.state.link_mode,
         same_volume: m.same_volume(),
         profiles: m.state.profiles.keys().cloned().collect(),
+        categories: categories(&m).into_iter().map(|c| (c.id, c.name)).collect(),
+        nexus_checked: m.state.nexus_checked,
         mods: m.state.mods,
     })
+}
+
+// ---------- Nexus metadata, categories, update checks ----------
+
+/// `<mods dir>/categories.json`: the game's Nexus categories as last fetched.
+#[derive(Serialize, Deserialize)]
+struct CategoryCache {
+    fetched: u64,
+    list: Vec<nexus::Category>,
+}
+
+const CATEGORY_MAX_AGE: u64 = 7 * 86_400;
+/// Automatic update checks run at most this often per game.
+const AUTO_CHECK_EVERY: u64 = 6 * 3600;
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn category_cache(m: &Manager) -> Option<CategoryCache> {
+    serde_json::from_slice(&std::fs::read(m.mods_dir.join("categories.json")).ok()?).ok()
+}
+
+/// Fetched categories, else the ones bundled with the game mode.
+fn categories(m: &Manager) -> Vec<nexus::Category> {
+    category_cache(m)
+        .map(|c| c.list)
+        .unwrap_or_else(|| game::default_categories(&m.game.mode_id))
+}
+
+/// Re-fetch the category list when it's a week old.
+fn refresh_categories(c: &nexus::Client, m: &Manager) -> R<()> {
+    if category_cache(m).is_some_and(|c| now().saturating_sub(c.fetched) < CATEGORY_MAX_AGE) {
+        return Ok(());
+    }
+    let list = c.categories(&m.game.nexus_domain())?;
+    let path = m.mods_dir.join("categories.json");
+    let cache = CategoryCache {
+        fetched: now(),
+        list,
+    };
+    nmm_core::write_durable(&path, &serde_json::to_vec_pretty(&cache).unwrap())
+}
+
+/// Identify unknown mods, refresh categories, look for updates; saves what it learnt.
+fn run_check(app: &AppHandle, mode: &str, task: Task) -> R<nexus::updates::CheckReport> {
+    let c = nexus_client(app)?;
+    let mut m = manager(app, mode)?;
+    let domain = m.game.nexus_domain();
+    let mut report = nexus::updates::check(&c, &domain, &mut m.state.mods, now(), &task)?;
+    if !report.errors.iter().any(|e| e.contains("rate limit")) {
+        m.state.nexus_checked = Some(now());
+    }
+    m.save()?;
+    if let Err(e) = refresh_categories(&c, &m) {
+        report.errors.push(format!("categories: {e}"));
+    }
+    tracing::info!(
+        game = mode,
+        identified = report.identified,
+        checked = report.checked,
+        updates = report.updates.len(),
+        errors = report.errors.len(),
+        "Nexus update check"
+    );
+    Ok(report)
+}
+
+/// Task: match unknown mods by md5 and check for updates.
+#[tauri::command]
+fn nexus_check(app: AppHandle, id: String, mode: String) {
+    spawn(
+        &app,
+        id,
+        mode.clone(),
+        "Nexus update check".into(),
+        move |app, task| run_check(app, &mode, task),
+    );
+}
+
+/// Check every configured game now, then every few hours, when logged in and the last check is stale.
+fn auto_check(app: AppHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(30));
+        let logged_in = key_entry()
+            .and_then(|e| e.get_password().map_err(|_| "".into()))
+            .is_ok();
+        if logged_in {
+            for mode in load_config(&app).games.keys() {
+                let stale = read(&app, mode).is_ok_and(|m| {
+                    m.state
+                        .nexus_checked
+                        .is_none_or(|t| now().saturating_sub(t) >= AUTO_CHECK_EVERY)
+                });
+                if stale {
+                    let mode2 = mode.clone();
+                    spawn(
+                        &app,
+                        format!("auto-check-{mode}"),
+                        mode.clone(),
+                        "automatic Nexus update check".into(),
+                        move |app, task| {
+                            let r = run_check(app, &mode2, task);
+                            let _ = app.emit("library-changed", &mode2);
+                            r
+                        },
+                    );
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(AUTO_CHECK_EVERY / 6));
+    });
+}
+
+/// Open a mod (or file) page on nexusmods.com in the browser.
+#[tauri::command]
+async fn open_nexus(app: AppHandle, domain: String, mod_id: u64, file_id: Option<u64>) -> R<()> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(nexus::link::mod_url(&domain, mod_id, file_id), None::<&str>)
+        .map_err(|e| format!("open browser: {e}").into())
 }
 
 #[tauri::command]
@@ -601,12 +730,15 @@ struct StageResult {
 
 /// Task: extract an archive; plain mods install right away, FOMods return their config for the wizard.
 #[tauri::command]
-fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf) {
+fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: Option<String>) {
     let what = format!("install {}", archive.display());
     spawn(&app, id, mode.clone(), what, move |app, task| {
         let mut m = manager(app, &mode)?;
         m.task = task;
-        let staged = m.stage(&archive)?;
+        let mut staged = m.stage(&archive)?;
+        staged.nexus = download
+            .and_then(|id| downloads_of(app).ok()?.get(&id))
+            .map(|d| download_meta(app, &d));
         match staged.fomod.clone() {
             None => {
                 m.transact(|m| m.install(staged, None))?;
@@ -898,6 +1030,27 @@ async fn download_remove(app: AppHandle, id: String, delete_file: bool) -> R<()>
     Ok(())
 }
 
+/// What a finished download says about its mod; author/category from Nexus when reachable.
+fn download_meta(app: &AppHandle, d: &Download) -> nexus::updates::NexusMeta {
+    let info = nexus_client(app).and_then(|c| c.mod_info(&d.domain, d.mod_id));
+    if let Err(e) = &info {
+        tracing::warn!(download = %d.id, "mod info for install: {e}");
+    }
+    let info = info.ok();
+    nexus::updates::NexusMeta {
+        domain: d.domain.clone(),
+        mod_id: d.mod_id,
+        file_id: d.file_id,
+        mod_name: d.mod_name.clone(),
+        file_name: d.name.clone(),
+        version: d.version.clone(),
+        author: info.as_ref().map(|i| i.author.clone()).unwrap_or_default(),
+        category_id: info.and_then(|i| i.category_id),
+        update: None,
+        checked: None,
+    }
+}
+
 /// Daily log files in the app log dir (7 kept), plus stderr; panics are logged too.
 fn init_logging(app: &AppHandle) {
     use tracing_subscriber::fmt::writer::MakeWriterExt;
@@ -970,6 +1123,7 @@ fn main() {
                 }
                 Err(e) => tracing::error!("download queue: {e}"),
             }
+            auto_check(app.handle().clone());
             // Windows/Linux pass the link as the only argument.
             std::env::args()
                 .skip(1)
@@ -1004,7 +1158,9 @@ fn main() {
             download_add,
             download_pause,
             download_resume,
-            download_remove
+            download_remove,
+            nexus_check,
+            open_nexus
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
