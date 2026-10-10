@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nexus Mod Manager",
+  "version": "0.1.0",
+  "identifier": "llc.ex-nihilo.nexus-mod-manager",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "title": "Nexus Mod Manager", "width": 1100, "height": 720, "dragDropEnabled": true }],
+    "security": { "csp": "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'" }
+  },
+  "bundle": { "active": true, "targets": "all", "icon": ["icons/icon.png", "icons/icon.ico"] }
+}
