@@ -69,14 +69,21 @@ impl App {
         if tasks.is_empty() {
             return false;
         }
-        tasks.values().for_each(|c| c.store(true, Ordering::Relaxed));
+        tasks
+            .values()
+            .for_each(|c| c.store(true, Ordering::Relaxed));
         self.quitting.store(true, Ordering::Relaxed);
         let _ = app.emit("quitting", ());
         true
     }
 
     fn lock(&self, mode: &str) -> Arc<Mutex<()>> {
-        self.locks.lock().unwrap().entry(mode.into()).or_default().clone()
+        self.locks
+            .lock()
+            .unwrap()
+            .entry(mode.into())
+            .or_default()
+            .clone()
     }
 }
 
@@ -109,7 +116,10 @@ fn spawn<T: Serialize + Clone + 'static>(
 ) {
     let st = app.state::<App>();
     let task = Task::default();
-    st.tasks.lock().unwrap().insert(id.clone(), task.cancel.clone());
+    st.tasks
+        .lock()
+        .unwrap()
+        .insert(id.clone(), task.cancel.clone());
     let lock = st.lock(&mode);
     let (app, emit_id) = (app.clone(), id.clone());
     let emitter = app.clone();
@@ -119,10 +129,21 @@ fn spawn<T: Serialize + Clone + 'static>(
         let mut l = last.lock().unwrap();
         if l.elapsed() >= Duration::from_millis(50) {
             *l = Instant::now();
-            let _ = emitter.emit("progress", Progress { id: &emit_id, step, done, total });
+            let _ = emitter.emit(
+                "progress",
+                Progress {
+                    id: &emit_id,
+                    step,
+                    done,
+                    total,
+                },
+            );
         }
     };
-    let task = Task { progress: Arc::new(progress), ..task };
+    let task = Task {
+        progress: Arc::new(progress),
+        ..task
+    };
     std::thread::spawn(move || {
         let res = {
             let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -134,7 +155,9 @@ fn spawn<T: Serialize + Clone + 'static>(
             let ms = start.elapsed().as_millis();
             match &res {
                 Ok(_) => tracing::info!(task = %id, ms, "{what}: done"),
-                Err(nmm_core::Error::Cancelled) => tracing::info!(task = %id, ms, "{what}: cancelled"),
+                Err(nmm_core::Error::Cancelled) => {
+                    tracing::info!(task = %id, ms, "{what}: cancelled")
+                }
                 Err(e) => tracing::error!(task = %id, ms, "{what}: {e}"),
             }
             res
@@ -146,8 +169,22 @@ fn spawn<T: Serialize + Clone + 'static>(
             tasks.is_empty()
         };
         let _ = match res {
-            Ok(v) => app.emit("done", Outcome { id, result: Some(v), error: None }),
-            Err(e) => app.emit("error", Outcome::<()> { id, result: None, error: Some(e.to_string()) }),
+            Ok(v) => app.emit(
+                "done",
+                Outcome {
+                    id,
+                    result: Some(v),
+                    error: None,
+                },
+            ),
+            Err(e) => app.emit(
+                "error",
+                Outcome::<()> {
+                    id,
+                    result: None,
+                    error: Some(e.to_string()),
+                },
+            ),
         };
         if last && st.quitting.load(Ordering::Relaxed) {
             app.exit(0);
@@ -163,12 +200,20 @@ fn cancel(st: State<'_, App>, id: String) {
 }
 
 fn config_path(app: &AppHandle) -> R<PathBuf> {
-    Ok(app.path().app_config_dir().map_err(|e| e.to_string())?.join("config.json"))
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|e| e.to_string())?
+        .join("config.json"))
 }
 
 fn load_config(app: &AppHandle) -> Config {
-    let Ok(path) = config_path(app) else { return Config::default() };
-    let Ok(s) = std::fs::read_to_string(&path) else { return Config::default() };
+    let Ok(path) = config_path(app) else {
+        return Config::default();
+    };
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return Config::default();
+    };
     serde_json::from_str(&s).unwrap_or_else(|e| {
         tracing::error!("{}: {e}; using defaults", path.display());
         Config::default()
@@ -189,7 +234,11 @@ fn update_config(app: &AppHandle, f: impl FnOnce(&mut Config)) -> R<()> {
 fn default_mods_dir(app: &AppHandle, mode: &str) -> R<PathBuf> {
     let root = match load_config(app).settings.mods_root {
         Some(r) => r,
-        None => app.path().app_data_dir().map_err(|e| e.to_string())?.join("Mods"),
+        None => app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("Mods"),
     };
     Ok(root.join(mode))
 }
@@ -197,7 +246,11 @@ fn default_mods_dir(app: &AppHandle, mode: &str) -> R<PathBuf> {
 /// Open a game's manager. Callers that write must hold the game's lock (i.e. run inside `spawn`).
 fn manager(app: &AppHandle, mode: &str) -> R<Manager> {
     let def = game::find(mode).ok_or("unknown game")?;
-    let cfg = load_config(app).games.get(mode).cloned().ok_or("game path not set")?;
+    let cfg = load_config(app)
+        .games
+        .get(mode)
+        .cloned()
+        .ok_or("game path not set")?;
     Manager::open(def, cfg.game_path, cfg.mods_dir)
 }
 
@@ -239,7 +292,12 @@ async fn games(app: AppHandle) -> Vec<GameInfo> {
 }
 
 #[tauri::command]
-async fn configure(app: AppHandle, mode: String, game_path: PathBuf, mods_dir: Option<PathBuf>) -> R<()> {
+async fn configure(
+    app: AppHandle,
+    mode: String,
+    game_path: PathBuf,
+    mods_dir: Option<PathBuf>,
+) -> R<()> {
     if !game_path.is_dir() {
         return Err(format!("{} is not a folder", game_path.display()).into());
     }
@@ -250,7 +308,13 @@ async fn configure(app: AppHandle, mode: String, game_path: PathBuf, mods_dir: O
     let fresh = !mods_dir.join("state.json").exists();
     tracing::info!(game = %mode, game_path = %game_path.display(), mods_dir = %mods_dir.display(), "configured");
     update_config(&app, |c| {
-        c.games.insert(mode.clone(), GameConfig { game_path, mods_dir });
+        c.games.insert(
+            mode.clone(),
+            GameConfig {
+                game_path,
+                mods_dir,
+            },
+        );
     })?;
     if fresh {
         // A new mods folder starts with the default link mode; nothing is deployed yet, so no relink.
@@ -271,7 +335,10 @@ struct SettingsView {
 
 #[tauri::command]
 async fn settings(app: AppHandle) -> SettingsView {
-    SettingsView { settings: load_config(&app).settings, log_dir: app.path().app_log_dir().ok() }
+    SettingsView {
+        settings: load_config(&app).settings,
+        log_dir: app.path().app_log_dir().ok(),
+    }
 }
 
 #[tauri::command]
@@ -318,7 +385,10 @@ async fn pick_archive(app: AppHandle) -> Option<String> {
 
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Option<String> {
-    app.dialog().file().blocking_pick_folder().map(|p| p.to_string())
+    app.dialog()
+        .file()
+        .blocking_pick_folder()
+        .map(|p| p.to_string())
 }
 
 #[derive(Clone, Serialize)]
@@ -338,19 +408,34 @@ fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf) {
         match staged.fomod.clone() {
             None => {
                 m.transact(|m| m.install(staged, None))?;
-                Ok(StageResult { token: None, fomod: None })
+                Ok(StageResult {
+                    token: None,
+                    fomod: None,
+                })
             }
             Some((_, cfg)) => {
                 let token = staged.id.clone();
-                app.state::<App>().staged.lock().unwrap().insert(token.clone(), (mode, staged));
-                Ok(StageResult { token: Some(token), fomod: Some(cfg) })
+                app.state::<App>()
+                    .staged
+                    .lock()
+                    .unwrap()
+                    .insert(token.clone(), (mode, staged));
+                Ok(StageResult {
+                    token: Some(token),
+                    fomod: Some(cfg),
+                })
             }
         }
     });
 }
 
 fn staged(st: &State<'_, App>, token: &str) -> R<(String, Staged)> {
-    st.staged.lock().unwrap().get(token).cloned().ok_or_else(|| "install session expired".into())
+    st.staged
+        .lock()
+        .unwrap()
+        .get(token)
+        .cloned()
+        .ok_or_else(|| "install session expired".into())
 }
 
 #[tauri::command]
@@ -369,14 +454,26 @@ async fn fomod_image(st: State<'_, App>, token: String, path: String) -> R<tauri
     let hit = walkdir::WalkDir::new(&base)
         .into_iter()
         .filter_map(Result::ok)
-        .find(|e| e.path().strip_prefix(&base).is_ok_and(|r| r.to_string_lossy().replace('\\', "/").to_lowercase() == want))
+        .find(|e| {
+            e.path()
+                .strip_prefix(&base)
+                .is_ok_and(|r| r.to_string_lossy().replace('\\', "/").to_lowercase() == want)
+        })
         .ok_or("image not found")?;
-    Ok(tauri::ipc::Response::new(std::fs::read(hit.path()).at(hit.path())?))
+    Ok(tauri::ipc::Response::new(
+        std::fs::read(hit.path()).at(hit.path())?,
+    ))
 }
 
 /// Task: install a staged FOMod with the wizard's selection.
 #[tauri::command]
-fn fomod_install(app: AppHandle, st: State<'_, App>, id: String, token: String, sel: Selection) -> R<()> {
+fn fomod_install(
+    app: AppHandle,
+    st: State<'_, App>,
+    id: String,
+    token: String,
+    sel: Selection,
+) -> R<()> {
     let (mode, s) = staged(&st, &token)?;
     let what = format!("install FOMod {}", s.archive.display());
     spawn(&app, id, mode.clone(), what, move |app, task| {
@@ -414,11 +511,17 @@ enum Op {
 /// Task: change intent and redeploy; a cancel rolls back to the previous intent.
 #[tauri::command]
 fn apply(app: AppHandle, id: String, mode: String, op: Op) {
-    spawn(&app, id, mode.clone(), format!("{op:?}"), move |app, task| {
-        let mut m = manager(app, &mode)?;
-        m.task = task;
-        m.transact(|m| run_op(m, op))
-    });
+    spawn(
+        &app,
+        id,
+        mode.clone(),
+        format!("{op:?}"),
+        move |app, task| {
+            let mut m = manager(app, &mode)?;
+            m.task = task;
+            m.transact(|m| run_op(m, op))
+        },
+    );
 }
 
 fn run_op(m: &mut Manager, op: Op) -> R<()> {
@@ -450,21 +553,33 @@ fn repair(app: AppHandle, id: String, mode: String) {
 /// Task: re-add stray mod folders; ones already live in the game come back enabled.
 #[tauri::command]
 fn adopt(app: AppHandle, id: String, mode: String) {
-    spawn(&app, id, mode.clone(), "adopt stray mods".into(), move |app, task| {
-        let mut m = manager(app, &mode)?;
-        m.task = task;
-        let mut report = None;
-        m.transact(|m| m.adopt().map(|r| report = Some(r)))?;
-        Ok(report.unwrap_or_default())
-    });
+    spawn(
+        &app,
+        id,
+        mode.clone(),
+        "adopt stray mods".into(),
+        move |app, task| {
+            let mut m = manager(app, &mode)?;
+            m.task = task;
+            let mut report = None;
+            m.transact(|m| m.adopt().map(|r| report = Some(r)))?;
+            Ok(report.unwrap_or_default())
+        },
+    );
 }
 
 #[tauri::command]
 async fn launch(app: AppHandle, mode: String) -> R<()> {
     // read() waits for this game's tasks, so the game never starts mid-deploy.
     let m = read(&app, &mode)?;
-    let exe = m.game.executable(&m.game_path).ok_or("no executable defined")?;
-    std::process::Command::new(&exe).current_dir(&m.game_path).spawn().at(&exe)?;
+    let exe = m
+        .game
+        .executable(&m.game_path)
+        .ok_or("no executable defined")?;
+    std::process::Command::new(&exe)
+        .current_dir(&m.game_path)
+        .spawn()
+        .at(&exe)?;
     tracing::info!(game = %mode, exe = %exe.display(), "launched");
     if load_config(&app).settings.close_on_launch {
         // Through ExitRequested, so tasks on other games still roll back first.
@@ -476,7 +591,9 @@ async fn launch(app: AppHandle, mode: String) -> R<()> {
 /// Daily log files in the app log dir (7 kept), plus stderr; panics are logged too.
 fn init_logging(app: &AppHandle) {
     use tracing_subscriber::fmt::writer::MakeWriterExt;
-    let Ok(dir) = app.path().app_log_dir() else { return };
+    let Ok(dir) = app.path().app_log_dir() else {
+        return;
+    };
     let _ = std::fs::create_dir_all(&dir); // else the appender's old-file pruning errors on first run
     let file = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -489,7 +606,10 @@ fn init_logging(app: &AppHandle) {
         Err(e) => return eprintln!("logging disabled: {}: {e}", dir.display()),
     };
     tracing_subscriber::fmt()
-        .with_writer(file.and(std::io::stderr).with_max_level(tracing::Level::INFO))
+        .with_writer(
+            file.and(std::io::stderr)
+                .with_max_level(tracing::Level::INFO),
+        )
         .with_ansi(false)
         .init();
     let default = std::panic::take_hook();
@@ -518,8 +638,23 @@ fn main() {
         })
         .manage(App::default())
         .invoke_handler(tauri::generate_handler![
-            games, configure, library, pick_archive, pick_folder, stage, fomod_eval, fomod_image, fomod_install,
-            fomod_cancel, apply, repair, adopt, launch, cancel, settings, save_settings
+            games,
+            configure,
+            library,
+            pick_archive,
+            pick_folder,
+            stage,
+            fomod_eval,
+            fomod_image,
+            fomod_install,
+            fomod_cancel,
+            apply,
+            repair,
+            adopt,
+            launch,
+            cancel,
+            settings,
+            save_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -539,7 +674,9 @@ mod tests {
     /// A config.json from before settings existed keeps its games and gets default settings.
     #[test]
     fn old_config_loads() {
-        let cfg: Config = serde_json::from_str(r#"{"games":{"Fallout4":{"game_path":"/g","mods_dir":"/m"}}}"#).unwrap();
+        let cfg: Config =
+            serde_json::from_str(r#"{"games":{"Fallout4":{"game_path":"/g","mods_dir":"/m"}}}"#)
+                .unwrap();
         assert_eq!(cfg.games["Fallout4"].mods_dir, PathBuf::from("/m"));
         assert!(cfg.settings.mods_root.is_none() && !cfg.settings.close_on_launch);
         assert_eq!(cfg.settings.link_mode, LinkMode::Auto);

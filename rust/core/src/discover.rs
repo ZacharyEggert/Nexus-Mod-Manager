@@ -43,6 +43,10 @@ pub fn detect(game: &GameDef) -> Option<PathBuf> {
     steam_roots()
         .iter()
         .flat_map(|r| libraries(r))
-        .flat_map(|lib| folders.iter().map(move |f| lib.join("steamapps/common").join(f)))
+        .flat_map(|lib| {
+            folders
+                .iter()
+                .map(move |f| lib.join("steamapps/common").join(f))
+        })
         .find(|p| p.is_dir())
 }

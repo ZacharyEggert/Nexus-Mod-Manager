@@ -50,7 +50,9 @@ fn file_name(path: &str) -> &str {
 
 fn ext(path: &str) -> String {
     let name = file_name(path);
-    name.rfind('.').map(|i| name[i..].to_ascii_lowercase()).unwrap_or_default()
+    name.rfind('.')
+        .map(|i| name[i..].to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 fn depth(path: &str) -> usize {
@@ -66,7 +68,11 @@ pub fn adjust(profile: Profile, path: &str, mod_name: &str) -> Option<Dest> {
         Profile::Fallout4 => install(strip_data(&fallout4(p))),
         Profile::Starfield => install(strip_data(&starfield(p))),
         Profile::OblivionRemastered => Some(oblivion_remastered(p)),
-        Profile::StardewValley => install(if under(p, "Mods") { p.into() } else { format!("Mods/{p}") }),
+        Profile::StardewValley => install(if under(p, "Mods") {
+            p.into()
+        } else {
+            format!("Mods/{p}")
+        }),
         Profile::Subnautica => install(subnautica(p)),
         Profile::Sims4 => sims4(p).map(Dest::Install),
         Profile::NoMansSky => no_mans_sky(p, mod_name).map(Dest::Install),
@@ -76,7 +82,11 @@ pub fn adjust(profile: Profile, path: &str, mod_name: &str) -> Option<Dest> {
 
 /// Port of `MakePluginDirectoryRelative` for the `Data` plugin dir.
 fn strip_data(p: &str) -> String {
-    if under(p, "Data") { after(p, "Data").into() } else { p.into() }
+    if under(p, "Data") {
+        after(p, "Data").into()
+    } else {
+        p.into()
+    }
 }
 
 /// A plugin one wrapper folder deep moves into Data.
@@ -102,7 +112,13 @@ const OR_WIN64: &str = "OblivionRemastered/Binaries/Win64";
 const OR_PAKS: &str = "OblivionRemastered/Content/Paks";
 
 fn oblivion_remastered(p: &str) -> Dest {
-    let game_root = |s: String| if under(&s, OR_DATA) { Dest::Install(after(&s, OR_DATA).into()) } else { Dest::GameRoot(s) };
+    let game_root = |s: String| {
+        if under(&s, OR_DATA) {
+            Dest::Install(after(&s, OR_DATA).into())
+        } else {
+            Dest::GameRoot(s)
+        }
+    };
     let e = ext(p);
     if under(p, "OblivionRemastered") || under(p, "Engine") {
         game_root(p.into())
@@ -111,7 +127,11 @@ fn oblivion_remastered(p: &str) -> Dest {
     } else if under(p, "Binaries") || under(p, "Content") {
         game_root(format!("OblivionRemastered/{p}"))
     } else if under(p, "Paks") {
-        game_root(format!("{OR_PAKS}/{}", after(p, "Paks")).trim_end_matches('/').into())
+        game_root(
+            format!("{OR_PAKS}/{}", after(p, "Paks"))
+                .trim_end_matches('/')
+                .into(),
+        )
     } else if under(p, "~mods") || under(p, "LogicMods") {
         game_root(format!("{OR_PAKS}/{p}"))
     } else if under(p, "OBSE") {
@@ -128,10 +148,22 @@ fn oblivion_remastered(p: &str) -> Dest {
 
 fn subnautica(p: &str) -> String {
     const BEPINEX_CHILDREN: &[&str] = &["cache", "config", "core", "patchers", "plugins"];
-    const ROOT_FILES: &[&str] = &[".doorstop_version", "doorstop_config.ini", "steam_appid.txt", "winhttp.dll"];
-    if ["BepInEx", "QMods", "Subnautica_Data", "SubnauticaZero_Data"].iter().any(|r| under(p, r)) {
+    const ROOT_FILES: &[&str] = &[
+        ".doorstop_version",
+        "doorstop_config.ini",
+        "steam_appid.txt",
+        "winhttp.dll",
+    ];
+    if ["BepInEx", "QMods", "Subnautica_Data", "SubnauticaZero_Data"]
+        .iter()
+        .any(|r| under(p, r))
+    {
         p.into()
-    } else if BEPINEX_CHILDREN.iter().any(|c| first(p).eq_ignore_ascii_case(c)) && depth(p) > 0 {
+    } else if BEPINEX_CHILDREN
+        .iter()
+        .any(|c| first(p).eq_ignore_ascii_case(c))
+        && depth(p) > 0
+    {
         format!("BepInEx/{p}")
     } else if depth(p) == 0 && ROOT_FILES.iter().any(|f| p.eq_ignore_ascii_case(f)) {
         p.into()
@@ -149,8 +181,21 @@ fn sims4(p: &str) -> Option<String> {
         return Some(p.into());
     }
     // Legacy wrapper cleanup: drop the outer folder of anything two or more deep.
-    let p = if depth(p) >= 2 { p.split_once('/').unwrap().1 } else { p };
-    const TRAY: &[&str] = &[".householdbinary", ".trayitem", ".sgi", ".hhi", ".blueprint", ".bpi", ".room", ".rmi"];
+    let p = if depth(p) >= 2 {
+        p.split_once('/').unwrap().1
+    } else {
+        p
+    };
+    const TRAY: &[&str] = &[
+        ".householdbinary",
+        ".trayitem",
+        ".sgi",
+        ".hhi",
+        ".blueprint",
+        ".bpi",
+        ".room",
+        ".rmi",
+    ];
     Some(if TRAY.contains(&e.as_str()) {
         format!("Tray/{p}")
     } else if e == ".save" {
@@ -170,8 +215,20 @@ pub fn resolve(path: &str, index: usize) -> String {
 }
 
 fn no_mans_sky(p: &str, mod_name: &str) -> Option<String> {
-    const CONTENT: &[&str] =
-        &["AUDIO", "FONTS", "GLOBALS", "LANGUAGE", "MATERIALS", "METADATA", "MODELS", "PIPELINES", "SCENES", "SHADERS", "TEXTURES", "UI"];
+    const CONTENT: &[&str] = &[
+        "AUDIO",
+        "FONTS",
+        "GLOBALS",
+        "LANGUAGE",
+        "MATERIALS",
+        "METADATA",
+        "MODELS",
+        "PIPELINES",
+        "SCENES",
+        "SHADERS",
+        "TEXTURES",
+        "UI",
+    ];
     let e = ext(p);
     if e == ".pak" {
         return None; // 5.50+ no longer loads legacy PSARC mods.
@@ -184,22 +241,49 @@ fn no_mans_sky(p: &str, mod_name: &str) -> Option<String> {
     }
     let segs: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
     let is = |i: usize, s: &str| segs.get(i).is_some_and(|x| x.eq_ignore_ascii_case(s));
-    let mut i = if is(0, "GAMEDATA") && is(1, "MODS") { 2 } else if is(0, "MODS") || is(0, "GAMEDATA") { 1 } else { 0 };
-    let content = |i: usize| segs.get(i).is_some_and(|s| CONTENT.iter().any(|c| c.eq_ignore_ascii_case(s)));
+    let mut i = if is(0, "GAMEDATA") && is(1, "MODS") {
+        2
+    } else if is(0, "MODS") || is(0, "GAMEDATA") {
+        1
+    } else {
+        0
+    };
+    let content = |i: usize| {
+        segs.get(i)
+            .is_some_and(|s| CONTENT.iter().any(|c| c.eq_ignore_ascii_case(s)))
+    };
     if segs.len() >= i + 2 && !content(i) && content(i + 1) {
         i += 1; // the archive's own outer mod-name folder
     }
-    let rest = if i < segs.len() { segs[i..].join("/") } else { file_name(p).into() };
-    Some(format!("GAMEDATA/MODS/{ORDER}_{}/{rest}", nms_folder(mod_name)))
+    let rest = if i < segs.len() {
+        segs[i..].join("/")
+    } else {
+        file_name(p).into()
+    };
+    Some(format!(
+        "GAMEDATA/MODS/{ORDER}_{}/{rest}",
+        nms_folder(mod_name)
+    ))
 }
 
 fn nms_folder(name: &str) -> String {
-    let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._ -".contains(c) { c } else { '_' }).collect();
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "._ -".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let safe = safe.split_whitespace().collect::<Vec<_>>().join(" ");
     let safe = safe.trim_matches(['.', ' ']);
     let safe = if safe.is_empty() { "NMMMod" } else { safe };
     // The game caps mod-folder names; char-boundary safe since `safe` is ASCII.
-    safe[..safe.len().min(96)].trim_end_matches(['.', ' ']).into()
+    safe[..safe.len().min(96)]
+        .trim_end_matches(['.', ' '])
+        .into()
 }
 
 /// Port of `CyberpunkPathAdjuster` for game 1.2+ (`patch` folders became `mod`).
@@ -212,8 +296,21 @@ fn cyberpunk(p: &str) -> String {
     if under(p, "x64") {
         return format!("bin/{p}");
     }
-    let p: String = p.split('/').map(|s| if s.eq_ignore_ascii_case("patch") { "mod" } else { s }).collect::<Vec<_>>().join("/");
-    if ["archive", "red4ext", "mods", "engine", "r6"].iter().any(|r| under(&p, r)) {
+    let p: String = p
+        .split('/')
+        .map(|s| {
+            if s.eq_ignore_ascii_case("patch") {
+                "mod"
+            } else {
+                s
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if ["archive", "red4ext", "mods", "engine", "r6"]
+        .iter()
+        .any(|r| under(&p, r))
+    {
         p
     } else if under(&p, "pc") {
         format!("archive/{p}")
@@ -245,15 +342,36 @@ mod tests {
 
         assert_eq!(a(OblivionRemastered, "Data/A.esp"), i("A.esp"));
         assert_eq!(a(OblivionRemastered, "textures/a.dds"), i("textures/a.dds"));
-        assert_eq!(a(OblivionRemastered, "obse64_loader.exe"), g("OblivionRemastered/Binaries/Win64/obse64_loader.exe"));
-        assert_eq!(a(OblivionRemastered, "OBSE/Plugins/x.dll"), g("OblivionRemastered/Binaries/Win64/OBSE/Plugins/x.dll"));
-        assert_eq!(a(OblivionRemastered, "sub/x.pak"), g("OblivionRemastered/Content/Paks/~mods/x.pak"));
-        assert_eq!(a(OblivionRemastered, "OblivionRemastered/Content/Dev/ObvData/Data/A.esp"), i("A.esp"));
+        assert_eq!(
+            a(OblivionRemastered, "obse64_loader.exe"),
+            g("OblivionRemastered/Binaries/Win64/obse64_loader.exe")
+        );
+        assert_eq!(
+            a(OblivionRemastered, "OBSE/Plugins/x.dll"),
+            g("OblivionRemastered/Binaries/Win64/OBSE/Plugins/x.dll")
+        );
+        assert_eq!(
+            a(OblivionRemastered, "sub/x.pak"),
+            g("OblivionRemastered/Content/Paks/~mods/x.pak")
+        );
+        assert_eq!(
+            a(
+                OblivionRemastered,
+                "OblivionRemastered/Content/Dev/ObvData/Data/A.esp"
+            ),
+            i("A.esp")
+        );
 
-        assert_eq!(a(StardewValley, "Foo/manifest.json"), i("Mods/Foo/manifest.json"));
+        assert_eq!(
+            a(StardewValley, "Foo/manifest.json"),
+            i("Mods/Foo/manifest.json")
+        );
         assert_eq!(a(StardewValley, "Mods/Foo/a.dll"), i("Mods/Foo/a.dll"));
 
-        assert_eq!(a(Subnautica, "plugins/X/x.dll"), i("BepInEx/plugins/X/x.dll"));
+        assert_eq!(
+            a(Subnautica, "plugins/X/x.dll"),
+            i("BepInEx/plugins/X/x.dll")
+        );
         assert_eq!(a(Subnautica, "winhttp.dll"), i("winhttp.dll"));
         assert_eq!(a(Subnautica, "X/x.dll"), i("BepInEx/plugins/X/x.dll"));
         assert_eq!(a(Subnautica, "QMods/X/x.dll"), i("QMods/X/x.dll"));
@@ -265,14 +383,35 @@ mod tests {
 
         assert_eq!(a(NoMansSky, "old.pak"), Option::None);
         assert_eq!(a(NoMansSky, "inject.dll"), i("Binaries/inject.dll"));
-        assert_eq!(a(NoMansSky, "MyMod/MODELS/a.mbin"), i("GAMEDATA/MODS/{order}_My Mod_/MODELS/a.mbin"));
-        assert_eq!(a(NoMansSky, "GAMEDATA/MODS/X/TEXTURES/a.dds"), i("GAMEDATA/MODS/{order}_My Mod_/TEXTURES/a.dds"));
+        assert_eq!(
+            a(NoMansSky, "MyMod/MODELS/a.mbin"),
+            i("GAMEDATA/MODS/{order}_My Mod_/MODELS/a.mbin")
+        );
+        assert_eq!(
+            a(NoMansSky, "GAMEDATA/MODS/X/TEXTURES/a.dds"),
+            i("GAMEDATA/MODS/{order}_My Mod_/TEXTURES/a.dds")
+        );
 
-        assert_eq!(a(Cyberpunk2077, "x64/plugins/a.dll"), i("bin/x64/plugins/a.dll"));
+        assert_eq!(
+            a(Cyberpunk2077, "x64/plugins/a.dll"),
+            i("bin/x64/plugins/a.dll")
+        );
         assert_eq!(a(Cyberpunk2077, "a.archive"), i("archive/pc/mod/a.archive"));
-        assert_eq!(a(Cyberpunk2077, "patch/a.archive"), i("archive/pc/mod/a.archive"));
-        assert_eq!(a(Cyberpunk2077, "pc/mod/a.archive"), i("archive/pc/mod/a.archive"));
-        assert_eq!(a(Cyberpunk2077, "r6/scripts/a.reds"), i("r6/scripts/a.reds"));
-        assert_eq!(a(Cyberpunk2077, "dispatcher.archive"), i("archive/pc/mod/dispatcher.archive"));
+        assert_eq!(
+            a(Cyberpunk2077, "patch/a.archive"),
+            i("archive/pc/mod/a.archive")
+        );
+        assert_eq!(
+            a(Cyberpunk2077, "pc/mod/a.archive"),
+            i("archive/pc/mod/a.archive")
+        );
+        assert_eq!(
+            a(Cyberpunk2077, "r6/scripts/a.reds"),
+            i("r6/scripts/a.reds")
+        );
+        assert_eq!(
+            a(Cyberpunk2077, "dispatcher.archive"),
+            i("archive/pc/mod/dispatcher.archive")
+        );
     }
 }

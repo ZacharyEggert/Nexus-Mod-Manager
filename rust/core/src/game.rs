@@ -11,9 +11,23 @@ macro_rules! defs {
 
 // ponytail: only the 17 data-driven modes; the C#-coded ones (BG3, DarkSouls, ...) need a game.json first.
 const DEFINITIONS: &[&str] = defs!(
-    "Cyberpunk2077", "Fallout3", "Fallout4", "FalloutNV", "Grimrock", "NoMansSky", "Oblivion",
-    "OblivionRemastered", "Skyrim", "SkyrimGOG", "SkyrimSE", "Starfield", "Subnautica",
-    "SubnauticaBelowZero", "TheSims4", "XCOM2", "stardewvalley"
+    "Cyberpunk2077",
+    "Fallout3",
+    "Fallout4",
+    "FalloutNV",
+    "Grimrock",
+    "NoMansSky",
+    "Oblivion",
+    "OblivionRemastered",
+    "Skyrim",
+    "SkyrimGOG",
+    "SkyrimSE",
+    "Starfield",
+    "Subnautica",
+    "SubnauticaBelowZero",
+    "TheSims4",
+    "XCOM2",
+    "stardewvalley"
 );
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,12 +111,17 @@ pub struct LauncherDef {
 pub fn all() -> Vec<GameDef> {
     DEFINITIONS
         .iter()
-        .map(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).expect("bundled game.json is valid"))
+        .map(|s| {
+            serde_json::from_str(s.trim_start_matches('\u{feff}'))
+                .expect("bundled game.json is valid")
+        })
         .collect()
 }
 
 pub fn find(mode_id: &str) -> Option<GameDef> {
-    all().into_iter().find(|g| g.mode_id.eq_ignore_ascii_case(mode_id))
+    all()
+        .into_iter()
+        .find(|g| g.mode_id.eq_ignore_ascii_case(mode_id))
 }
 
 /// Expand `{GamePath}`-style tokens and Windows separators into a native path.
@@ -123,7 +142,11 @@ pub fn expand(template: &str, game_path: &Path) -> PathBuf {
     }
     let native = s.replace('\\', std::path::MAIN_SEPARATOR_STR);
     let p = PathBuf::from(native);
-    if p.is_absolute() { p } else { game_path.join(p) }
+    if p.is_absolute() {
+        p
+    } else {
+        game_path.join(p)
+    }
 }
 
 impl GameDef {
@@ -132,7 +155,11 @@ impl GameDef {
         if let Some(m) = &self.mod_install.managed_installation_path {
             return expand(m, game_path);
         }
-        match self.plugin.as_ref().and_then(|p| p.plugin_directory_suffix.as_deref()) {
+        match self
+            .plugin
+            .as_ref()
+            .and_then(|p| p.plugin_directory_suffix.as_deref())
+        {
             Some(suffix) => expand(suffix, game_path),
             None => game_path.to_path_buf(),
         }
@@ -153,7 +180,10 @@ impl GameDef {
             .policy
             .as_ref()
             .and_then(|p| p.plugins_file_path.as_deref())
-            .or(self.gamebryo.as_ref().and_then(|g| g.plugins_file_path.as_deref()))?;
+            .or(self
+                .gamebryo
+                .as_ref()
+                .and_then(|g| g.plugins_file_path.as_deref()))?;
         Some(expand(path, game_path))
     }
 
@@ -190,7 +220,8 @@ impl GameDef {
 
 pub(crate) fn has_ext(file: &str, exts: &[String]) -> bool {
     let lower = file.to_ascii_lowercase();
-    exts.iter().any(|e| lower.ends_with(&e.to_ascii_lowercase()))
+    exts.iter()
+        .any(|e| lower.ends_with(&e.to_ascii_lowercase()))
 }
 
 #[cfg(test)]

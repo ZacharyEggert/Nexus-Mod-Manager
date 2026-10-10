@@ -15,7 +15,10 @@ pub enum Error {
     #[error("cancelled")]
     Cancelled,
     #[error("{}: {source}", path.display())]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     // ponytail: archive/XML/JSON errors are flattened to text; add variants when a caller branches on one.
     #[error("{0}")]
     Other(String),
@@ -42,7 +45,10 @@ pub trait IoContext<T> {
 
 impl<T> IoContext<T> for std::io::Result<T> {
     fn at(self, path: impl AsRef<Path>) -> Result<T> {
-        self.map_err(|source| Error::Io { path: path.as_ref().into(), source })
+        self.map_err(|source| Error::Io {
+            path: path.as_ref().into(),
+            source,
+        })
     }
 }
 
@@ -56,7 +62,9 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::rename(&tmp, path).at(path)?;
     // ponytail: dir flush is Unix-only; NTFS journals the rename itself.
     #[cfg(unix)]
-    std::fs::File::open(path.parent().unwrap()).and_then(|d| d.sync_all()).at(path.parent().unwrap())?;
+    std::fs::File::open(path.parent().unwrap())
+        .and_then(|d| d.sync_all())
+        .at(path.parent().unwrap())?;
     Ok(())
 }
 
@@ -72,7 +80,10 @@ pub struct Task {
 
 impl Default for Task {
     fn default() -> Self {
-        Self { cancel: Arc::default(), progress: Arc::new(|_, _, _| {}) }
+        Self {
+            cancel: Arc::default(),
+            progress: Arc::new(|_, _, _| {}),
+        }
     }
 }
 
@@ -106,7 +117,14 @@ mod tests {
     fn errors_name_the_path_and_serialize_as_text() {
         let p = Path::new("/definitely/not/here.esp");
         let e = std::fs::read(p).at(p).unwrap_err();
-        assert!(matches!(e, Error::Io { .. }) && e.to_string().starts_with("/definitely/not/here.esp: "), "{e}");
-        assert_eq!(serde_json::to_string(&Error::Cancelled).unwrap(), r#""cancelled""#);
+        assert!(
+            matches!(e, Error::Io { .. })
+                && e.to_string().starts_with("/definitely/not/here.esp: "),
+            "{e}"
+        );
+        assert_eq!(
+            serde_json::to_string(&Error::Cancelled).unwrap(),
+            r#""cancelled""#
+        );
     }
 }

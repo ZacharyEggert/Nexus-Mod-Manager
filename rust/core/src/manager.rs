@@ -14,11 +14,11 @@ use crate::adjust::{self, Dest};
 use crate::fomod::{self, ModuleConfig, Selection};
 use crate::game::{has_ext, GameDef};
 use crate::{write_durable, Error, IoContext, Task};
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 type R<T> = crate::Result<T>;
 
@@ -42,8 +42,15 @@ pub struct ModEntry {
 impl ModEntry {
     /// (path, is game-root) for every file this mod deploys right now, or could (`all`).
     fn deployable(&self, all: bool) -> impl Iterator<Item = (&String, bool)> {
-        let root = if all || self.game_root { &self.root_files[..] } else { &[] };
-        self.files.iter().map(|f| (f, false)).chain(root.iter().map(|f| (f, true)))
+        let root = if all || self.game_root {
+            &self.root_files[..]
+        } else {
+            &[]
+        };
+        self.files
+            .iter()
+            .map(|f| (f, false))
+            .chain(root.iter().map(|f| (f, true)))
     }
 }
 
@@ -62,7 +69,11 @@ pub struct Deployed {
 /// `deployed` key. Game-root paths get a leading `/` so `x.dll` in the root and in Data don't collide.
 fn key(path: &str, game_root: bool) -> String {
     let lower = path.to_lowercase();
-    if game_root { format!("/{lower}") } else { lower }
+    if game_root {
+        format!("/{lower}")
+    } else {
+        lower
+    }
 }
 
 /// Where one deployed path lives on disk.
@@ -145,16 +156,27 @@ const IGNORED: &[&str] = &["meta.ini"];
 const IGNORED_DIRS: &[&str] = &["__MACOSX"];
 
 fn rel(path: &Path, base: &Path) -> String {
-    path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/")
+    path.strip_prefix(base)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn files_under(dir: &Path) -> Vec<PathBuf> {
     walkdir::WalkDir::new(dir)
         .into_iter()
-        .filter_entry(|e| !IGNORED_DIRS.iter().any(|d| e.file_name().eq_ignore_ascii_case(d)))
+        .filter_entry(|e| {
+            !IGNORED_DIRS
+                .iter()
+                .any(|d| e.file_name().eq_ignore_ascii_case(d))
+        })
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
-        .filter(|e| !IGNORED.iter().any(|i| e.file_name().eq_ignore_ascii_case(i)))
+        .filter(|e| {
+            !IGNORED
+                .iter()
+                .any(|i| e.file_name().eq_ignore_ascii_case(i))
+        })
         .map(|e| e.into_path())
         .collect()
 }
@@ -168,7 +190,9 @@ pub fn find_prefix(dir: &Path, game: &GameDef) -> PathBuf {
         .map(|s| s.rsplit(['\\', '/']).next().unwrap_or(s).to_string());
     let mut cur = dir.to_path_buf();
     loop {
-        let Ok(rd) = fs::read_dir(&cur) else { return dir.to_path_buf() };
+        let Ok(rd) = fs::read_dir(&cur) else {
+            return dir.to_path_buf();
+        };
         let (mut dirs, mut files) = (vec![], vec![]);
         for e in rd.filter_map(Result::ok) {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -180,11 +204,18 @@ pub fn find_prefix(dir: &Path, game: &GameDef) -> PathBuf {
                 files.push(name);
             }
         }
-        let is_stop = |n: &str| n.eq_ignore_ascii_case("fomod") || game.stop_folders.iter().any(|s| s.eq_ignore_ascii_case(n));
+        let is_stop = |n: &str| {
+            n.eq_ignore_ascii_case("fomod")
+                || game.stop_folders.iter().any(|s| s.eq_ignore_ascii_case(n))
+        };
         if dirs.iter().any(|(n, _)| is_stop(n)) || files.iter().any(|f| game.is_plugin(f)) {
             return cur;
         }
-        if let Some((_, p)) = dirs.iter().find(|(n, _)| plugin_dir.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(n))) {
+        if let Some((_, p)) = dirs.iter().find(|(n, _)| {
+            plugin_dir
+                .as_deref()
+                .is_some_and(|d| d.eq_ignore_ascii_case(n))
+        }) {
             return p.clone();
         }
         match (dirs.len(), files.len()) {
@@ -198,13 +229,32 @@ pub fn find_prefix(dir: &Path, game: &GameDef) -> PathBuf {
 /// Data folder; plus whether the mod's game-root toggle should default on.
 // ponytail: default-on when a sibling is exe/dll/asi (script extenders, ENB); the user flips it otherwise.
 fn game_root_files(dir: &Path, prefix: &Path, game: &GameDef) -> (Vec<(PathBuf, String)>, bool) {
-    let is_data = |p: &Path| game.data_dir_name().zip(p.file_name()).is_some_and(|(d, n)| n.eq_ignore_ascii_case(d));
-    let Some(base) = prefix.parent().filter(|_| game.mod_install.supports_game_root_install && prefix != dir && is_data(prefix)) else {
+    let is_data = |p: &Path| {
+        game.data_dir_name()
+            .zip(p.file_name())
+            .is_some_and(|(d, n)| n.eq_ignore_ascii_case(d))
+    };
+    let Some(base) = prefix.parent().filter(|_| {
+        game.mod_install.supports_game_root_install && prefix != dir && is_data(prefix)
+    }) else {
         return (vec![], false);
     };
-    let files: Vec<_> = files_under(base).into_iter().filter(|f| !f.starts_with(prefix)).collect();
-    let binary = files.iter().any(|f| has_ext(&f.to_string_lossy(), &[".exe".into(), ".dll".into(), ".asi".into()]));
-    let files = files.into_iter().map(|f| (rel(&f, base), f)).filter(|(r, _)| !r.to_lowercase().starts_with("fomod/")).map(|(r, f)| (f, r)).collect();
+    let files: Vec<_> = files_under(base)
+        .into_iter()
+        .filter(|f| !f.starts_with(prefix))
+        .collect();
+    let binary = files.iter().any(|f| {
+        has_ext(
+            &f.to_string_lossy(),
+            &[".exe".into(), ".dll".into(), ".asi".into()],
+        )
+    });
+    let files = files
+        .into_iter()
+        .map(|f| (rel(&f, base), f))
+        .filter(|(r, _)| !r.to_lowercase().starts_with("fomod/"))
+        .map(|(r, f)| (f, r))
+        .collect();
     (files, binary)
 }
 
@@ -229,7 +279,9 @@ fn place_file(src: &Path, dst: &Path, mode: LinkMode, real_copy: bool, need_hard
         _ if real_copy => false,
         LinkMode::Copy => false,
         LinkMode::Hardlink => {
-            fs::hard_link(src, dst).map_err(|e| fail(e) + " (hardlink mode: mods folder must be on the game's drive)")?;
+            fs::hard_link(src, dst).map_err(|e| {
+                fail(e) + " (hardlink mode: mods folder must be on the game's drive)"
+            })?;
             true
         }
         LinkMode::Symlink if !need_hard => symlink(src, dst).is_ok(),
@@ -283,7 +335,8 @@ fn candidates(journal: &Journal) -> Candidates {
 
 // ponytail: byte compare, not inode; a game file identical to a mod's reads as deployed.
 fn same_content(a: &Path, b: &Path) -> bool {
-    matches!((fs::metadata(a), fs::metadata(b)), (Ok(x), Ok(y)) if x.len() == y.len()) && fs::read(a).ok() == fs::read(b).ok()
+    matches!((fs::metadata(a), fs::metadata(b)), (Ok(x), Ok(y)) if x.len() == y.len())
+        && fs::read(a).ok() == fs::read(b).ok()
 }
 
 /// `link` is a hardlink or symlink to `src`.
@@ -329,7 +382,9 @@ fn resolve_ci(base: &Path, rel: &str) -> PathBuf {
             Some(part.into())
         } else {
             fs::read_dir(&cur).ok().and_then(|rd| {
-                rd.filter_map(Result::ok).map(|e| e.file_name()).find(|n| n.to_string_lossy().eq_ignore_ascii_case(part))
+                rd.filter_map(Result::ok)
+                    .map(|e| e.file_name())
+                    .find(|n| n.to_string_lossy().eq_ignore_ascii_case(part))
             })
         };
         match found {
@@ -360,10 +415,18 @@ impl Manager {
         let load = |f: &str| serde_json::from_str(&fs::read_to_string(mods_dir.join(f)).ok()?).ok();
         let state = match load("state.json").or_else(|| load("state.json.bak")) {
             Some(s) => s,
-            None if mods_dir.join("state.json").exists() => return Err("state.json and its backup are unreadable".into()),
+            None if mods_dir.join("state.json").exists() => {
+                return Err("state.json and its backup are unreadable".into())
+            }
             None => State::default(),
         };
-        let mut m = Self { game, game_path, mods_dir, state, task: Task::default() };
+        let mut m = Self {
+            game,
+            game_path,
+            mods_dir,
+            state,
+            task: Task::default(),
+        };
         if let Ok(s) = fs::read_to_string(m.journal_path()) {
             tracing::warn!(mods_dir = %m.mods_dir.display(), "unfinished deploy found; recovering");
             match serde_json::from_str(&s) {
@@ -398,13 +461,26 @@ impl Manager {
     /// Settle every marked mod: delete its stored files when it's neither listed nor deployed,
     /// then drop the marker. Unmarked files are never deleted, whatever `state.json` says.
     fn resolve_pending(&self) -> R<()> {
-        for e in fs::read_dir(self.mods_dir.join(".pending")).into_iter().flatten().filter_map(Result::ok) {
+        for e in fs::read_dir(self.mods_dir.join(".pending"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+        {
             let id = e.file_name().to_string_lossy().into_owned();
-            let used = self.state.mods.iter().any(|m| m.id == id) || self.state.deployed.values().any(|d| d.mod_id == id);
+            let used = self.state.mods.iter().any(|m| m.id == id)
+                || self.state.deployed.values().any(|d| d.mod_id == id);
             if !used {
-                for dir in [self.virtual_dir(&id), self.mods_dir.join("GameRootInstall").join(&id)] {
+                for dir in [
+                    self.virtual_dir(&id),
+                    self.mods_dir.join("GameRootInstall").join(&id),
+                ] {
                     match fs::remove_dir_all(&dir) {
-                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(Error::Io { path: dir, source: e }),
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(Error::Io {
+                                path: dir,
+                                source: e,
+                            })
+                        }
                         _ => {}
                     }
                 }
@@ -416,11 +492,17 @@ impl Manager {
     }
 
     pub fn save(&self) -> R<()> {
-        let (path, bak) = (self.mods_dir.join("state.json"), self.mods_dir.join("state.json.bak"));
+        let (path, bak) = (
+            self.mods_dir.join("state.json"),
+            self.mods_dir.join("state.json.bak"),
+        );
         // Previous state survives as .bak: a hardlink to the old, already-flushed inode, no copy.
         let _ = fs::remove_file(&bak);
         let _ = fs::hard_link(&path, &bak);
-        write_durable(&path, &serde_json::to_vec_pretty(&self.state).map_err(|e| e.to_string())?)
+        write_durable(
+            &path,
+            &serde_json::to_vec_pretty(&self.state).map_err(|e| e.to_string())?,
+        )
     }
 
     fn virtual_dir(&self, id: &str) -> PathBuf {
@@ -433,28 +515,59 @@ impl Manager {
 
     fn place(&self, d: &Deployed) -> Place {
         let (root, backup, store) = if d.game_root {
-            (self.game_path.clone(), self.mods_dir.join("GameRootBackup"), self.mods_dir.join("GameRootInstall").join(&d.mod_id))
+            (
+                self.game_path.clone(),
+                self.mods_dir.join("GameRootBackup"),
+                self.mods_dir.join("GameRootInstall").join(&d.mod_id),
+            )
         } else {
-            (self.install_root(), self.mods_dir.join("Backup"), self.virtual_dir(&d.mod_id))
+            (
+                self.install_root(),
+                self.mods_dir.join("Backup"),
+                self.virtual_dir(&d.mod_id),
+            )
         };
         let src = store.join(d.src.as_deref().unwrap_or(&d.path));
         let target = resolve_ci(&root, &d.path);
         // Backup mirrors the game's casing, and is itself looked up case-insensitively.
         let saved = resolve_ci(&backup, &rel(&target, &root));
-        Place { target, saved, src, root, backup }
+        Place {
+            target,
+            saved,
+            src,
+            root,
+            backup,
+        }
     }
 
     /// fileDependency state for FOMod conditions.
     pub fn file_state(&self, name: &str) -> String {
         // ponytail: no Inactive state; a present file counts as Active.
-        if resolve_ci(&self.install_root(), &name.replace('\\', "/")).exists() { "Active" } else { "Missing" }.into()
+        if resolve_ci(&self.install_root(), &name.replace('\\', "/")).exists() {
+            "Active"
+        } else {
+            "Missing"
+        }
+        .into()
     }
 
     // ---------- install ----------
 
     pub fn stage(&self, archive: &Path) -> R<Staged> {
-        let stem = archive.file_stem().and_then(|s| s.to_str()).ok_or("bad archive name")?;
-        let id: String = stem.chars().map(|c| if c.is_alphanumeric() || " -_.()".contains(c) { c } else { '_' }).collect();
+        let stem = archive
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("bad archive name")?;
+        let id: String = stem
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || " -_.()".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         // "." / ".." would make VirtualInstall/<id> the store itself (and `remove` delete it).
         if id.trim_matches('.').is_empty() {
             return Err("bad archive name".into());
@@ -464,12 +577,19 @@ impl Manager {
         }
         let dir = self.mods_dir.join(".staging").join(&id);
         let _ = fs::remove_dir_all(&dir);
-        let fomod = crate::archive::extract(archive, &dir, &self.task).and_then(|()| match fomod::locate(&dir) {
-            Some((base, cfg)) => Ok(Some((base, fomod::parse(&fs::read(&cfg).at(&cfg)?)?))),
-            None => Ok(None),
+        let fomod = crate::archive::extract(archive, &dir, &self.task).and_then(|()| {
+            match fomod::locate(&dir) {
+                Some((base, cfg)) => Ok(Some((base, fomod::parse(&fs::read(&cfg).at(&cfg)?)?))),
+                None => Ok(None),
+            }
         });
         match fomod {
-            Ok(fomod) => Ok(Staged { id, archive: archive.to_path_buf(), dir, fomod }),
+            Ok(fomod) => Ok(Staged {
+                id,
+                archive: archive.to_path_buf(),
+                dir,
+                fomod,
+            }),
             Err(e) => {
                 let _ = fs::remove_dir_all(&dir);
                 Err(e)
@@ -488,7 +608,12 @@ impl Manager {
         let mut map: BTreeMap<String, (PathBuf, String, bool)> = BTreeMap::new();
         let mut profile_root = false;
         let mut insert = |src: PathBuf, dest: String, game_root: bool| {
-            if !IGNORED.iter().any(|i| dest.rsplit('/').next().unwrap_or("").eq_ignore_ascii_case(i)) {
+            if !IGNORED.iter().any(|i| {
+                dest.rsplit('/')
+                    .next()
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case(i)
+            }) {
                 map.insert(key(&dest, game_root), (src, dest, game_root));
             }
         };
@@ -515,15 +640,29 @@ impl Manager {
                     .collect();
                 for f in cfg.files(sel, &|n| self.file_state(n)) {
                     let key = f.source.trim_matches('/').to_lowercase();
-                    let src = index.get(&key).ok_or_else(|| format!("FOMod references missing file '{}'", f.source))?;
+                    let src = index
+                        .get(&key)
+                        .ok_or_else(|| format!("FOMod references missing file '{}'", f.source))?;
                     let dest = f.destination.trim_matches('/');
                     if f.is_folder {
                         for file in files_under(src) {
                             let r = rel(&file, src);
-                            put(file, if dest.is_empty() { r } else { format!("{dest}/{r}") }, false);
+                            put(
+                                file,
+                                if dest.is_empty() {
+                                    r
+                                } else {
+                                    format!("{dest}/{r}")
+                                },
+                                false,
+                            );
                         }
                     } else {
-                        let d = if dest.is_empty() || dest == "." { f.source.rsplit('/').next().unwrap().to_string() } else { dest.to_string() };
+                        let d = if dest.is_empty() || dest == "." {
+                            f.source.rsplit('/').next().unwrap().to_string()
+                        } else {
+                            dest.to_string()
+                        };
                         put(src.clone(), d, false);
                     }
                 }
@@ -548,14 +687,29 @@ impl Manager {
         let (mut files, mut root_files) = (vec![], vec![]);
         let n = map.len() as u64;
         self.mark_pending(&staged.id)?;
-        let copied = map.into_values().enumerate().try_for_each(|(i, (src, dest, game_root))| {
-            self.task.step("Copying mod files", i as u64, n)?;
-            let to = self.place(&Deployed { path: dest.clone(), mod_id: staged.id.clone(), game_root, src: None }).src;
-            fs::create_dir_all(to.parent().unwrap()).at(to.parent().unwrap())?;
-            fs::copy(&src, &to).at(&to)?;
-            if game_root { &mut root_files } else { &mut files }.push(dest);
-            Ok::<_, Error>(())
-        });
+        let copied = map
+            .into_values()
+            .enumerate()
+            .try_for_each(|(i, (src, dest, game_root))| {
+                self.task.step("Copying mod files", i as u64, n)?;
+                let to = self
+                    .place(&Deployed {
+                        path: dest.clone(),
+                        mod_id: staged.id.clone(),
+                        game_root,
+                        src: None,
+                    })
+                    .src;
+                fs::create_dir_all(to.parent().unwrap()).at(to.parent().unwrap())?;
+                fs::copy(&src, &to).at(&to)?;
+                if game_root {
+                    &mut root_files
+                } else {
+                    &mut files
+                }
+                .push(dest);
+                Ok::<_, Error>(())
+            });
         let _ = fs::remove_dir_all(&staged.dir);
         if let Err(e) = copied {
             if let Err(e) = self.resolve_pending() {
@@ -595,7 +749,10 @@ impl Manager {
         let progress = self.task.progress.clone();
         let task = std::mem::replace(
             &mut self.task,
-            Task { cancel: Default::default(), progress: Arc::new(move |_, done, total| progress("Rolling back", done, total)) },
+            Task {
+                cancel: Default::default(),
+                progress: Arc::new(move |_, done, total| progress("Rolling back", done, total)),
+            },
         );
         let rolled_back = self.deploy();
         self.task = task;
@@ -614,7 +771,11 @@ impl Manager {
     }
 
     pub fn set_active(&mut self, id: &str, active: bool) -> R<()> {
-        self.state.mods.iter_mut().filter(|m| m.id == id).for_each(|m| m.active = active);
+        self.state
+            .mods
+            .iter_mut()
+            .filter(|m| m.id == id)
+            .for_each(|m| m.active = active);
         self.deploy()
     }
 
@@ -625,7 +786,10 @@ impl Manager {
 
     /// Whether the mods folder and the game share a volume, i.e. hardlinks can work.
     pub fn same_volume(&self) -> bool {
-        let (a, b) = (fs::canonicalize(&self.mods_dir), fs::canonicalize(&self.game_path));
+        let (a, b) = (
+            fs::canonicalize(&self.mods_dir),
+            fs::canonicalize(&self.game_path),
+        );
         let (Ok(a), Ok(b)) = (a, b) else { return false };
         #[cfg(unix)]
         {
@@ -635,19 +799,29 @@ impl Manager {
         // ponytail: drive-letter / UNC-share compare; mounted folders inside a drive read as the same volume.
         #[cfg(windows)]
         {
-            let prefix = |p: &Path| p.components().next().map(|c| c.as_os_str().to_ascii_lowercase());
+            let prefix = |p: &Path| {
+                p.components()
+                    .next()
+                    .map(|c| c.as_os_str().to_ascii_lowercase())
+            };
             prefix(&a) == prefix(&b)
         }
     }
 
     pub fn set_game_root(&mut self, id: &str, on: bool) -> R<()> {
-        self.state.mods.iter_mut().filter(|m| m.id == id).for_each(|m| m.game_root = on);
+        self.state
+            .mods
+            .iter_mut()
+            .filter(|m| m.id == id)
+            .for_each(|m| m.game_root = on);
         self.deploy()
     }
 
     /// Move a mod `delta` places in load order (positive = later = higher priority).
     pub fn reorder(&mut self, id: &str, delta: isize) -> R<()> {
-        let Some(i) = self.state.mods.iter().position(|m| m.id == id) else { return Ok(()) };
+        let Some(i) = self.state.mods.iter().position(|m| m.id == id) else {
+            return Ok(());
+        };
         let j = (i as isize + delta).clamp(0, self.state.mods.len() as isize - 1) as usize;
         let m = self.state.mods.remove(i);
         self.state.mods.insert(j, m);
@@ -657,13 +831,24 @@ impl Manager {
     // ---------- profiles ----------
 
     pub fn save_profile(&mut self, name: &str) -> R<()> {
-        let active = self.state.mods.iter().filter(|m| m.active).map(|m| m.id.clone()).collect();
+        let active = self
+            .state
+            .mods
+            .iter()
+            .filter(|m| m.active)
+            .map(|m| m.id.clone())
+            .collect();
         self.state.profiles.insert(name.into(), active);
         self.save()
     }
 
     pub fn load_profile(&mut self, name: &str) -> R<()> {
-        let ids = self.state.profiles.get(name).cloned().ok_or("no such profile")?;
+        let ids = self
+            .state
+            .profiles
+            .get(name)
+            .cloned()
+            .ok_or("no such profile")?;
         for m in &mut self.state.mods {
             m.active = ids.contains(&m.id);
         }
@@ -683,11 +868,25 @@ impl Manager {
     /// Links of active mods, or of every mod and file (`all`), in load order.
     fn links(&self, all: bool) -> Vec<(String, Deployed)> {
         let mut out = vec![];
-        for (i, m) in self.state.mods.iter().enumerate().filter(|(_, m)| all || m.active) {
+        for (i, m) in self
+            .state
+            .mods
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| all || m.active)
+        {
             for (f, game_root) in m.deployable(all) {
                 let path = adjust::resolve(f, i);
                 let src = (path != *f).then(|| f.clone());
-                out.push((key(&path, game_root), Deployed { path, mod_id: m.id.clone(), game_root, src }));
+                out.push((
+                    key(&path, game_root),
+                    Deployed {
+                        path,
+                        mod_id: m.id.clone(),
+                        game_root,
+                        src,
+                    },
+                ));
             }
         }
         out
@@ -733,23 +932,35 @@ impl Manager {
             .keys()
             .chain(desired.keys())
             .filter(|k| relink || deployed.get(*k) != desired.get(*k))
-            .map(|k| (k.clone(), (deployed.get(k).cloned(), desired.get(k).cloned())))
+            .map(|k| {
+                (
+                    k.clone(),
+                    (deployed.get(k).cloned(), desired.get(k).cloned()),
+                )
+            })
             .collect();
 
         // ponytail: link ops themselves aren't flushed; relies on APFS/NTFS/ext4 ordering metadata ops.
         if !journal.is_empty() {
-            write_durable(&self.journal_path(), &serde_json::to_vec(&journal).map_err(|e| e.to_string())?)?;
+            write_durable(
+                &self.journal_path(),
+                &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
+            )?;
         }
         let result = self.apply(&journal);
         match &result {
-            Ok(()) if !journal.is_empty() => tracing::info!(changes = journal.len(), mode = ?self.state.link_mode, game = %self.game.mode_id, "deployed"),
+            Ok(()) if !journal.is_empty() => {
+                tracing::info!(changes = journal.len(), mode = ?self.state.link_mode, game = %self.game.mode_id, "deployed")
+            }
             Err(Error::Cancelled) | Ok(()) => {}
             Err(e) => tracing::error!(game = %self.game.mode_id, "deploy failed, reconciling: {e}"),
         }
         if result.is_ok() {
             self.state.deployed_mode = self.state.link_mode;
         }
-        if !journal.is_empty() && self.game.mod_install.path_adjustment_profile == adjust::Profile::NoMansSky {
+        if !journal.is_empty()
+            && self.game.mod_install.path_adjustment_profile == adjust::Profile::NoMansSky
+        {
             // NMS caches its mod list here; stale entries hide changed mods. Best effort, as in C#.
             let _ = fs::remove_file(self.game_path.join("Binaries/SETTINGS/GCMODSETTINGS.MXML"));
         }
@@ -765,14 +976,20 @@ impl Manager {
         self.sync_plugins()?;
         self.save()?;
         match fs::remove_file(self.journal_path()) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::Io { path: self.journal_path(), source: e }),
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::Io {
+                path: self.journal_path(),
+                source: e,
+            }),
             _ => Ok(()),
         }
     }
 
     fn apply(&mut self, journal: &Journal) -> R<()> {
         // A cancel is just an early error: deploy() reconciles the partial apply like any failure.
-        let n = journal.values().map(|(o, n)| o.is_some() as u64 + n.is_some() as u64).sum();
+        let n = journal
+            .values()
+            .map(|(o, n)| o.is_some() as u64 + n.is_some() as u64)
+            .sum();
         let mut i = 0;
         let mut step = |task: &Task| {
             i += 1;
@@ -781,11 +998,22 @@ impl Manager {
         for (key, (old, new)) in journal {
             let Some(d) = old else { continue };
             step(&self.task)?;
-            let Place { target, saved, root, backup, .. } = self.place(d);
+            let Place {
+                target,
+                saved,
+                root,
+                backup,
+                ..
+            } = self.place(d);
             match fs::remove_file(&target) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(Error::Io { path: target, source: e }),
+                Err(e) => {
+                    return Err(Error::Io {
+                        path: target,
+                        source: e,
+                    })
+                }
             }
             self.state.deployed.remove(key);
             crash_point();
@@ -800,7 +1028,9 @@ impl Manager {
         for (key, (_, new)) in journal {
             let Some(d) = new else { continue };
             step(&self.task)?;
-            let Place { target, saved, src, .. } = self.place(d);
+            let Place {
+                target, saved, src, ..
+            } = self.place(d);
             if target.exists() && !saved.exists() {
                 move_file(&target, &saved)?;
                 crash_point();
@@ -808,7 +1038,13 @@ impl Manager {
                 let _ = fs::remove_file(&target);
             }
             let g = &self.game;
-            place_file(&src, &target, self.state.link_mode, g.needs_real_copy(&d.path), g.needs_hardlink(&d.path))?;
+            place_file(
+                &src,
+                &target,
+                self.state.link_mode,
+                g.needs_real_copy(&d.path),
+                g.needs_hardlink(&d.path),
+            )?;
             crash_point();
             self.state.deployed.insert(key.clone(), d.clone());
         }
@@ -819,7 +1055,12 @@ impl Manager {
     /// game files stranded in Backup. Converges any partial `apply`; the next deploy redoes the rest.
     fn reconcile(&mut self, cands: &Candidates) -> R<()> {
         for (key, (at, links)) in cands {
-            let Place { target, saved, backup, .. } = self.place(at);
+            let Place {
+                target,
+                saved,
+                backup,
+                ..
+            } = self.place(at);
             for t in [&target, &saved] {
                 let _ = fs::remove_file(tmp_path(t));
             }
@@ -846,7 +1087,10 @@ impl Manager {
                 // Not ours, not the backup: the game replaced the file (an update). Keep the live one,
                 // set the stale backup aside, or the next deploy would overwrite the live one with it.
                 // ponytail: a later orphan of the same path replaces an earlier one.
-                let aside = self.mods_dir.join("OrphanedBackup").join(rel(&saved, &self.mods_dir));
+                let aside = self
+                    .mods_dir
+                    .join("OrphanedBackup")
+                    .join(rel(&saved, &self.mods_dir));
                 move_file(&saved, &aside)?;
                 prune(saved.parent().unwrap(), &backup);
                 tracing::warn!(path = %aside.display(), "stale backup set aside");
@@ -859,10 +1103,20 @@ impl Manager {
     pub fn strays(&self) -> Vec<String> {
         let mut ids = std::collections::BTreeSet::new();
         for dir in ["VirtualInstall", "GameRootInstall"] {
-            let entries = fs::read_dir(self.mods_dir.join(dir)).into_iter().flatten().filter_map(Result::ok);
-            ids.extend(entries.filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()));
+            let entries = fs::read_dir(self.mods_dir.join(dir))
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok);
+            ids.extend(
+                entries
+                    .filter(|e| e.path().is_dir())
+                    .map(|e| e.file_name().to_string_lossy().into_owned()),
+            );
         }
-        ids.retain(|id| !self.state.mods.iter().any(|m| &m.id == id) && !self.mods_dir.join(".pending").join(id).exists());
+        ids.retain(|id| {
+            !self.state.mods.iter().any(|m| &m.id == id)
+                && !self.mods_dir.join(".pending").join(id).exists()
+        });
         ids.into_iter().collect()
     }
 
@@ -877,11 +1131,27 @@ impl Manager {
             v
         };
         for id in &ids {
-            let (files, root_files) = (list(self.virtual_dir(id)), list(self.mods_dir.join("GameRootInstall").join(id)));
-            self.state.mods.push(ModEntry { id: id.clone(), name: id.clone(), archive: String::new(), files, root_files, game_root: false, active: false });
+            let (files, root_files) = (
+                list(self.virtual_dir(id)),
+                list(self.mods_dir.join("GameRootInstall").join(id)),
+            );
+            self.state.mods.push(ModEntry {
+                id: id.clone(),
+                name: id.clone(),
+                archive: String::new(),
+                files,
+                root_files,
+                game_root: false,
+                active: false,
+            });
         }
         let report = self.scan()?;
-        let live: Vec<(String, bool)> = self.state.deployed.values().map(|d| (d.mod_id.clone(), d.game_root)).collect();
+        let live: Vec<(String, bool)> = self
+            .state
+            .deployed
+            .values()
+            .map(|d| (d.mod_id.clone(), d.game_root))
+            .collect();
         for m in self.state.mods.iter_mut().filter(|m| ids.contains(&m.id)) {
             m.active = live.iter().any(|(id, _)| *id == m.id);
             m.game_root = live.iter().any(|(id, root)| *id == m.id && *root);
@@ -905,19 +1175,35 @@ impl Manager {
         // A path nothing recorded and nothing backed up may be a game file that happens to equal
         // a mod's: count it as deployed only when it's provably a link, or its mod provably has
         // other files live (copy-only files like .exe can't be proven links), never by content alone.
-        let mut trusted: std::collections::HashSet<String> = self.state.deployed.keys().cloned().collect();
+        let mut trusted: std::collections::HashSet<String> =
+            self.state.deployed.keys().cloned().collect();
         let backups = self.backups();
         trusted.extend(backups.iter().map(|(g, p)| key(p, *g)));
         let all = self.links(true);
-        let links: Vec<_> = (self.wanted().into_iter().rev().chain(self.state.deployed.clone()).chain(all.into_iter().rev()))
-            .map(|(k, d)| {
-                let p = self.place(&d);
-                let linked = same_file(&p.src, &p.target);
-                (k, d, linked)
-            })
+        let links: Vec<_> = (self
+            .wanted()
+            .into_iter()
+            .rev()
+            .chain(self.state.deployed.clone())
+            .chain(all.into_iter().rev()))
+        .map(|(k, d)| {
+            let p = self.place(&d);
+            let linked = same_file(&p.src, &p.target);
+            (k, d, linked)
+        })
+        .collect();
+        let mut proven: std::collections::HashSet<String> = self
+            .state
+            .deployed
+            .values()
+            .map(|d| d.mod_id.clone())
             .collect();
-        let mut proven: std::collections::HashSet<String> = self.state.deployed.values().map(|d| d.mod_id.clone()).collect();
-        proven.extend(links.iter().filter(|(_, _, linked)| *linked).map(|(_, d, _)| d.mod_id.clone()));
+        proven.extend(
+            links
+                .iter()
+                .filter(|(_, _, linked)| *linked)
+                .map(|(_, d, _)| d.mod_id.clone()),
+        );
         let links: Vec<_> = links
             .into_iter()
             .map(|(k, d, linked)| {
@@ -941,13 +1227,30 @@ impl Manager {
             add(k, d, live);
         }
         for (game_root, path) in backups {
-            add(key(&path, game_root), Deployed { path, mod_id: String::new(), game_root, src: None }, false);
+            add(
+                key(&path, game_root),
+                Deployed {
+                    path,
+                    mod_id: String::new(),
+                    game_root,
+                    src: None,
+                },
+                false,
+            );
         }
         tracing::info!(paths = cands.len(), "scanning game against mods");
-        let aside = |m: &Self| files_under(&m.mods_dir.join("OrphanedBackup")).iter().map(|f| rel(f, &m.mods_dir)).collect::<Vec<_>>();
+        let aside = |m: &Self| {
+            files_under(&m.mods_dir.join("OrphanedBackup"))
+                .iter()
+                .map(|f| rel(f, &m.mods_dir))
+                .collect::<Vec<_>>()
+        };
         let before = aside(self);
         self.reconcile(&cands)?;
-        let orphaned_backups = aside(self).into_iter().filter(|f| !before.contains(f)).collect();
+        let orphaned_backups = aside(self)
+            .into_iter()
+            .filter(|f| !before.contains(f))
+            .collect();
         let untracked = cands
             .iter()
             .filter(|(k, (_, live))| live.is_empty() && !self.state.deployed.contains_key(*k))
@@ -958,7 +1261,10 @@ impl Manager {
             })
             .map(|d| rel(&self.place(d).target, &self.game_path))
             .collect();
-        let report = RepairReport { orphaned_backups, untracked };
+        let report = RepairReport {
+            orphaned_backups,
+            untracked,
+        };
         if report != RepairReport::default() {
             tracing::warn!(?report, "repair left files for review");
         }
@@ -971,7 +1277,11 @@ impl Manager {
         let mut out = vec![];
         for (game_root, dir) in [(false, "Backup"), (true, "GameRootBackup")] {
             let base = self.mods_dir.join(dir);
-            for e in walkdir::WalkDir::new(&base).into_iter().filter_map(Result::ok).filter(|e| e.file_type().is_file()) {
+            for e in walkdir::WalkDir::new(&base)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+            {
                 let path = rel(e.path(), &base);
                 if path.ends_with(".nmm-tmp") {
                     let _ = fs::remove_file(e.path());
@@ -985,16 +1295,36 @@ impl Manager {
 
     /// Rewrite our entries in plugins.txt; lines for plugins we don't manage are kept.
     fn sync_plugins(&self) -> R<()> {
-        let Some(path) = self.game.plugins_file(&self.game_path) else { return Ok(()) };
+        let Some(path) = self.game.plugins_file(&self.game_path) else {
+            return Ok(());
+        };
         let marker = self.game.active_marker();
-        let ours = |name: &str| self.state.mods.iter().flat_map(|m| &m.files).any(|f| f.eq_ignore_ascii_case(name));
+        let ours = |name: &str| {
+            self.state
+                .mods
+                .iter()
+                .flat_map(|m| &m.files)
+                .any(|f| f.eq_ignore_ascii_case(name))
+        };
         let existing = fs::read_to_string(&path).unwrap_or_default();
-        let mut lines: Vec<String> =
-            existing.lines().filter(|l| !ours(l.trim().trim_start_matches('*'))).map(str::to_string).collect();
+        let mut lines: Vec<String> = existing
+            .lines()
+            .filter(|l| !ours(l.trim().trim_start_matches('*')))
+            .map(str::to_string)
+            .collect();
         // ponytail: managed plugins follow mod load order; per-plugin ordering UI not ported.
         for m in self.state.mods.iter().filter(|m| m.active) {
-            for f in m.files.iter().filter(|f| !f.contains('/') && self.game.is_plugin(f)) {
-                if self.state.deployed.get(&f.to_lowercase()).is_some_and(|d| d.mod_id == m.id) {
+            for f in m
+                .files
+                .iter()
+                .filter(|f| !f.contains('/') && self.game.is_plugin(f))
+            {
+                if self
+                    .state
+                    .deployed
+                    .get(&f.to_lowercase())
+                    .is_some_and(|d| d.mod_id == m.id)
+                {
                     lines.push(format!("{marker}{f}"));
                 }
             }
@@ -1013,13 +1343,14 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::io::Write;
+    use std::sync::Arc;
 
     fn zip(path: &Path, files: &[(&str, &str)]) {
         let mut z = zip::ZipWriter::new(fs::File::create(path).unwrap());
         for (n, body) in files {
-            z.start_file(*n, zip::write::SimpleFileOptions::default()).unwrap();
+            z.start_file(*n, zip::write::SimpleFileOptions::default())
+                .unwrap();
             z.write_all(body.as_bytes()).unwrap();
         }
         z.finish().unwrap();
@@ -1039,38 +1370,62 @@ mod tests {
         let mut m = Manager::open(game, game_path, t.path().join("mods")).unwrap();
 
         let a = t.path().join("ModA.zip");
-        zip(&a, &[("ModA v1/textures/sky.dds", "A"), ("ModA v1/A.esp", "p"), ("ModA v1/meta.ini", "x")]);
+        zip(
+            &a,
+            &[
+                ("ModA v1/textures/sky.dds", "A"),
+                ("ModA v1/A.esp", "p"),
+                ("ModA v1/meta.ini", "x"),
+            ],
+        );
         let b = t.path().join("ModB.zip");
         zip(&b, &[("Data/textures/sky.dds", "B")]);
 
         let s = m.stage(&a).unwrap();
         m.install(s, None).unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "A"
+        );
         assert!(data.join("A.esp").exists() && !data.join("meta.ini").exists());
 
         let s = m.stage(&b).unwrap();
         m.install(s, None).unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "B");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "B"
+        );
         assert_eq!(m.conflicts()["ModA"], vec!["ModB"]);
 
         m.reorder("ModB", -1).unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "A"
+        );
 
         m.remove("ModA").unwrap();
         m.set_active("ModB", false).unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "vanilla"
+        );
         assert!(!data.join("A.esp").exists());
 
         m.save_profile("b-on").unwrap();
         m.set_active("ModB", true).unwrap();
         m.load_profile("b-on").unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "vanilla"
+        );
 
-        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        let reopened =
+            Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
         assert_eq!(reopened.state.mods.len(), 1);
 
         fs::write(m.mods_dir.join("state.json"), "").unwrap(); // torn write after power cut
-        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        let reopened =
+            Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
         assert_eq!(reopened.state.mods.len(), 1);
     }
 
@@ -1090,7 +1445,14 @@ mod tests {
         let a = t.path().join("ModA.zip");
         zip(&a, &[("textures/sky.dds", "A"), ("textures/a.dds", "a")]);
         let b = t.path().join("ModB.zip");
-        zip(&b, &[("textures/sky.dds", "B"), ("textures/b.dds", "b"), ("textures/c.dds", "c")]);
+        zip(
+            &b,
+            &[
+                ("textures/sky.dds", "B"),
+                ("textures/b.dds", "b"),
+                ("textures/c.dds", "c"),
+            ],
+        );
         let s = m.stage(&a).unwrap();
         m.install(s, None).unwrap();
 
@@ -1098,7 +1460,11 @@ mod tests {
         let rollback_steps = Arc::new(AtomicU64::new(0));
         let cancel_after = |m: &mut Manager, label: &'static str, n: u64| {
             let task = Task::default();
-            let (flag, seen, rb) = (task.cancel.clone(), Arc::new(AtomicU64::new(0)), rollback_steps.clone());
+            let (flag, seen, rb) = (
+                task.cancel.clone(),
+                Arc::new(AtomicU64::new(0)),
+                rollback_steps.clone(),
+            );
             m.task = Task {
                 progress: Arc::new(move |l, _, _| {
                     if l == "Rolling back" {
@@ -1114,10 +1480,18 @@ mod tests {
         let sky = || fs::read_to_string(data.join("textures/sky.dds")).unwrap();
         let unchanged = |m: &Manager| {
             assert!(m.in_sync() && !m.journal_path().exists());
-            assert_eq!(m.state.mods.iter().map(|x| (x.id.as_str(), x.active)).collect::<Vec<_>>(), [("ModA", true)]);
+            assert_eq!(
+                m.state
+                    .mods
+                    .iter()
+                    .map(|x| (x.id.as_str(), x.active))
+                    .collect::<Vec<_>>(),
+                [("ModA", true)]
+            );
             assert_eq!(sky(), "A");
             assert!(data.join("textures/a.dds").exists() && !data.join("textures/b.dds").exists());
-            let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+            let reopened =
+                Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
             assert_eq!(reopened.state.deployed, m.state.deployed);
         };
 
@@ -1129,24 +1503,41 @@ mod tests {
         for (label, n) in [("Copying mod files", 1), ("Deploying", 1), ("Deploying", 3)] {
             cancel_after(&mut m, label, n);
             let s = m.stage(&b).unwrap();
-            assert_eq!(m.transact(|m| m.install(s, None)).unwrap_err().to_string(), "cancelled", "{label} {n}");
+            assert_eq!(
+                m.transact(|m| m.install(s, None)).unwrap_err().to_string(),
+                "cancelled",
+                "{label} {n}"
+            );
             unchanged(&m);
             assert!(!m.virtual_dir("ModB").exists());
         }
 
         cancel_after(&mut m, "Deploying", 1);
-        assert_eq!(m.transact(|m| m.set_active("ModA", false)).unwrap_err().to_string(), "cancelled");
+        assert_eq!(
+            m.transact(|m| m.set_active("ModA", false))
+                .unwrap_err()
+                .to_string(),
+            "cancelled"
+        );
         unchanged(&m);
 
         cancel_after(&mut m, "Deploying", 1);
-        assert_eq!(m.transact(|m| m.set_link_mode(LinkMode::Copy)).unwrap_err().to_string(), "cancelled");
+        assert_eq!(
+            m.transact(|m| m.set_link_mode(LinkMode::Copy))
+                .unwrap_err()
+                .to_string(),
+            "cancelled"
+        );
         unchanged(&m);
         assert_eq!(m.state.link_mode, LinkMode::Auto);
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
             let links = |p: &str| fs::metadata(data.join(p)).unwrap().nlink();
-            assert!(links("textures/sky.dds") > 1 && links("textures/a.dds") > 1, "relinked back to hardlinks");
+            assert!(
+                links("textures/sky.dds") > 1 && links("textures/a.dds") > 1,
+                "relinked back to hardlinks"
+            );
         }
         assert!(rollback_steps.load(Ordering::Relaxed) > 0);
 
@@ -1158,7 +1549,9 @@ mod tests {
 
         // Killed mid-install-copy: the marked, unlisted mod is deleted on the next open; an
         // unmarked folder the state doesn't know about is left alone.
-        let reopen = |m: &Manager| Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        let reopen = |m: &Manager| {
+            Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap()
+        };
         fs::create_dir_all(m.mods_dir.join("VirtualInstall/ModB/textures")).unwrap();
         fs::create_dir_all(m.mods_dir.join("VirtualInstall/Stranger")).unwrap();
         m.mark_pending("ModB").unwrap();
@@ -1179,11 +1572,21 @@ mod tests {
     #[test]
     fn crash_mid_deploy_recovers() {
         // (active before, sky.dds before, active after, sky.dds after)
-        let cases: [(&[&str], &str, &[&str], &str); 3] =
-            [(&["ModA"], "A", &["ModB"], "B"), (&["ModA"], "A", &[], "vanilla"), (&[], "vanilla", &["ModA"], "A")];
+        let cases: [(&[&str], &str, &[&str], &str); 3] = [
+            (&["ModA"], "A", &["ModB"], "B"),
+            (&["ModA"], "A", &[], "vanilla"),
+            (&[], "vanilla", &["ModA"], "A"),
+        ];
         // Copy mode exercises kills between a copy's tmp write and its rename.
-        let runs = [(LinkMode::Auto, false), (LinkMode::Copy, false), (LinkMode::Auto, true), (LinkMode::Copy, true)];
-        for ((mode, garble), (before, was, after, want)) in runs.into_iter().flat_map(|r| cases.map(|c| (r, c))) {
+        let runs = [
+            (LinkMode::Auto, false),
+            (LinkMode::Copy, false),
+            (LinkMode::Auto, true),
+            (LinkMode::Copy, true),
+        ];
+        for ((mode, garble), (before, was, after, want)) in
+            runs.into_iter().flat_map(|r| cases.map(|c| (r, c)))
+        {
             let mut crashes = 0;
             for n in 0.. {
                 let t = tempfile::tempdir().unwrap();
@@ -1193,23 +1596,34 @@ mod tests {
                 let mut game = crate::game::find("Fallout4").unwrap();
                 game.plugin.as_mut().unwrap().policy = None;
                 game.gamebryo = None;
-                let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
+                let mut m =
+                    Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
                 m.state.link_mode = mode;
-                for (name, files) in [("ModA", &[("textures/sky.dds", "A"), ("A.esp", "p")][..]), ("ModB", &[("textures/sky.dds", "B")])] {
+                for (name, files) in [
+                    ("ModA", &[("textures/sky.dds", "A"), ("A.esp", "p")][..]),
+                    ("ModB", &[("textures/sky.dds", "B")]),
+                ] {
                     let z = t.path().join(format!("{name}.zip"));
                     zip(&z, files);
                     let s = m.stage(&z).unwrap();
                     m.install(s, None).unwrap();
                 }
-                let set = |m: &mut Manager, ids: &[&str]| m.state.mods.iter_mut().for_each(|x| x.active = ids.contains(&x.id.as_str()));
+                let set = |m: &mut Manager, ids: &[&str]| {
+                    m.state
+                        .mods
+                        .iter_mut()
+                        .for_each(|x| x.active = ids.contains(&x.id.as_str()))
+                };
                 set(&mut m, before);
                 m.deploy().unwrap();
 
                 set(&mut m, after);
                 CRASH_AFTER.with(|c| c.set(n));
-                let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.deploy())).is_err();
+                let crashed =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.deploy())).is_err();
                 CRASH_AFTER.with(|c| c.set(usize::MAX));
-                let (game, game_path, mods_dir) = (m.game.clone(), m.game_path.clone(), m.mods_dir.clone());
+                let (game, game_path, mods_dir) =
+                    (m.game.clone(), m.game_path.clone(), m.mods_dir.clone());
                 drop(m);
                 if garble && mods_dir.join("deploy.journal").exists() {
                     fs::write(mods_dir.join("deploy.journal"), "{\"textures/sky.d").unwrap();
@@ -1219,27 +1633,56 @@ mod tests {
                 assert!(!m.journal_path().exists());
                 // Reopen finishes the job: the game holds the saved intent, all of it.
                 assert!(m.in_sync(), "{mode:?} n={n}");
-                assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), if crashed { was } else { want }, "{mode:?} n={n}");
+                assert_eq!(
+                    fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+                    if crashed { was } else { want },
+                    "{mode:?} n={n}"
+                );
                 // A lost journal can't tell a fresh copy-mode A.esp from a game file: it's kept, untracked.
-                let stray_esp = garble && mode == LinkMode::Copy && data.join("A.esp").exists() && !m.state.deployed.contains_key("a.esp");
-                assert_eq!(data.join("A.esp").exists(), stray_esp || (if crashed { before } else { after }).contains(&"ModA"), "{mode:?} n={n}");
-                let strays = walkdir::WalkDir::new(t.path()).into_iter().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().ends_with(".nmm-tmp")).count();
+                let stray_esp = garble
+                    && mode == LinkMode::Copy
+                    && data.join("A.esp").exists()
+                    && !m.state.deployed.contains_key("a.esp");
+                assert_eq!(
+                    data.join("A.esp").exists(),
+                    stray_esp || (if crashed { before } else { after }).contains(&"ModA"),
+                    "{mode:?} n={n}"
+                );
+                let strays = walkdir::WalkDir::new(t.path())
+                    .into_iter()
+                    .filter_map(Result::ok)
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".nmm-tmp"))
+                    .count();
                 assert_eq!(strays, 0, "{mode:?} n={n}");
                 for d in m.state.deployed.values() {
-                    assert!(same_content(&m.virtual_dir(&d.mod_id).join(&d.path), &data.join(&d.path)), "n={n} {d:?}");
+                    assert!(
+                        same_content(&m.virtual_dir(&d.mod_id).join(&d.path), &data.join(&d.path)),
+                        "n={n} {d:?}"
+                    );
                 }
-                let vanilla = [data.join("textures/sky.dds"), m.mods_dir.join("Backup/textures/sky.dds")]
-                    .iter()
-                    .filter(|p| fs::read_to_string(p).is_ok_and(|s| s == "vanilla"))
-                    .count();
+                let vanilla = [
+                    data.join("textures/sky.dds"),
+                    m.mods_dir.join("Backup/textures/sky.dds"),
+                ]
+                .iter()
+                .filter(|p| fs::read_to_string(p).is_ok_and(|s| s == "vanilla"))
+                .count();
                 assert_eq!(vanilla, 1, "n={n}: game file lost or duplicated");
 
                 set(&mut m, after);
                 m.deploy().unwrap();
-                assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), want, "n={n}");
+                assert_eq!(
+                    fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+                    want,
+                    "n={n}"
+                );
                 set(&mut m, &[]);
                 m.deploy().unwrap();
-                assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla", "n={n}");
+                assert_eq!(
+                    fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+                    "vanilla",
+                    "n={n}"
+                );
                 assert!(stray_esp || !data.join("A.esp").exists());
                 assert!(!m.mods_dir.join("Backup/textures/sky.dds").exists());
 
@@ -1268,8 +1711,18 @@ mod tests {
         game.gamebryo = None;
         let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
         for (name, files) in [
-            ("ModA", &[("textures/sky.dds", "A"), ("textures/a.dds", "a"), ("textures/patched.dds", "A")][..]),
-            ("ModB", &[("textures/same.dds", "same"), ("textures/gone.dds", "g")]),
+            (
+                "ModA",
+                &[
+                    ("textures/sky.dds", "A"),
+                    ("textures/a.dds", "a"),
+                    ("textures/patched.dds", "A"),
+                ][..],
+            ),
+            (
+                "ModB",
+                &[("textures/same.dds", "same"), ("textures/gone.dds", "g")],
+            ),
         ] {
             let z = t.path().join(format!("{name}.zip"));
             zip(&z, files);
@@ -1287,9 +1740,15 @@ mod tests {
 
         let mut m = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
         let report = m.repair().unwrap();
-        assert_eq!(report.orphaned_backups, ["OrphanedBackup/Backup/textures/patched.dds"]);
+        assert_eq!(
+            report.orphaned_backups,
+            ["OrphanedBackup/Backup/textures/patched.dds"]
+        );
         assert_eq!(report.untracked, ["Data/textures/same.dds"]);
-        assert!(m.repair().unwrap().orphaned_backups.is_empty(), "only this run's are reported");
+        assert!(
+            m.repair().unwrap().orphaned_backups.is_empty(),
+            "only this run's are reported"
+        );
         assert!(m.in_sync());
         assert_eq!(m.state.deployed, want);
         let read = |p: &Path| fs::read_to_string(p).unwrap();
@@ -1298,7 +1757,11 @@ mod tests {
         assert_eq!(read(&data.join("textures/gone.dds")), "game file");
         assert_eq!(read(&data.join("textures/same.dds")), "same");
         assert_eq!(read(&data.join("textures/patched.dds")), "A");
-        assert_eq!(read(&backup.join("patched.dds")), "v2", "updated game file is the backup now");
+        assert_eq!(
+            read(&backup.join("patched.dds")),
+            "v2",
+            "updated game file is the backup now"
+        );
 
         m.set_active("ModA", false).unwrap();
         assert_eq!(read(&data.join("textures/sky.dds")), "vanilla");
@@ -1321,16 +1784,34 @@ mod tests {
         game.gamebryo = None;
         let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
         for (name, files) in [
-            ("ModB", &[("textures/sky.dds", "B"), ("textures/b.dds", "b")][..]),
+            (
+                "ModB",
+                &[("textures/sky.dds", "B"), ("textures/b.dds", "b")][..],
+            ),
             // loader.exe is always copied (realFileRequired), so only proven live via its siblings.
-            ("ModA", &[("x/loader.exe", "exe"), ("x/readme.txt", "r"), ("x/Data/Scripts/a.pex", "p"), ("x/Data/textures/sky.dds", "A")]),
+            (
+                "ModA",
+                &[
+                    ("x/loader.exe", "exe"),
+                    ("x/readme.txt", "r"),
+                    ("x/Data/Scripts/a.pex", "p"),
+                    ("x/Data/textures/sky.dds", "A"),
+                ],
+            ),
         ] {
             let z = t.path().join(format!("{name}.zip"));
             zip(&z, files);
             m.install(m.stage(&z).unwrap(), None).unwrap();
         }
         m.set_active("ModB", false).unwrap();
-        let (files, deployed) = (m.state.mods.iter().map(|x| (x.files.clone(), x.root_files.clone())).collect::<Vec<_>>(), m.state.deployed.clone());
+        let (files, deployed) = (
+            m.state
+                .mods
+                .iter()
+                .map(|x| (x.files.clone(), x.root_files.clone()))
+                .collect::<Vec<_>>(),
+            m.state.deployed.clone(),
+        );
         fs::remove_file(m.mods_dir.join("state.json")).unwrap();
         fs::remove_file(m.mods_dir.join("state.json.bak")).unwrap();
 
@@ -1339,20 +1820,41 @@ mod tests {
         assert_eq!(m.strays(), ["ModA", "ModB"]);
         assert_eq!(m.adopt().unwrap(), RepairReport::default());
         assert!(m.strays().is_empty() && m.in_sync());
-        let got: Vec<_> = m.state.mods.iter().map(|x| (x.id.as_str(), x.active, x.game_root)).collect();
+        let got: Vec<_> = m
+            .state
+            .mods
+            .iter()
+            .map(|x| (x.id.as_str(), x.active, x.game_root))
+            .collect();
         assert_eq!(got, [("ModA", true, true), ("ModB", false, false)]);
-        let mut got_files: Vec<_> = m.state.mods.iter().map(|x| (x.files.clone(), x.root_files.clone())).collect();
+        let mut got_files: Vec<_> = m
+            .state
+            .mods
+            .iter()
+            .map(|x| (x.files.clone(), x.root_files.clone()))
+            .collect();
         got_files.reverse();
         assert_eq!(got_files, files);
         assert_eq!(m.state.deployed, deployed);
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "A"
+        );
         assert!(!data.join("textures/b.dds").exists() && game_path.join("loader.exe").exists());
 
         m.set_active("ModA", false).unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
-        assert!(!game_path.join("loader.exe").exists() && !m.mods_dir.join("GameRootBackup").exists());
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "vanilla"
+        );
+        assert!(
+            !game_path.join("loader.exe").exists() && !m.mods_dir.join("GameRootBackup").exists()
+        );
         m.set_active("ModB", true).unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "B");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "B"
+        );
     }
 
     #[test]
@@ -1367,53 +1869,90 @@ mod tests {
         let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
 
         let skse = t.path().join("skse64.zip");
-        zip(&skse, &[
-            ("skse64_2_02_06/skse64_loader.exe", "exe"),
-            ("skse64_2_02_06/steam_api64.dll", "modded"),
-            ("skse64_2_02_06/readme.txt", "r"),
-            ("skse64_2_02_06/Data/Scripts/Test.pex", "pex"),
-        ]);
+        zip(
+            &skse,
+            &[
+                ("skse64_2_02_06/skse64_loader.exe", "exe"),
+                ("skse64_2_02_06/steam_api64.dll", "modded"),
+                ("skse64_2_02_06/readme.txt", "r"),
+                ("skse64_2_02_06/Data/Scripts/Test.pex", "pex"),
+            ],
+        );
         let s = m.stage(&skse).unwrap();
         m.install(s, None).unwrap();
-        assert_eq!(fs::read_to_string(game_path.join("skse64_loader.exe")).unwrap(), "exe");
-        assert_eq!(fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(), "modded");
-        assert_eq!(fs::read_to_string(game_path.join("Data/Scripts/Test.pex")).unwrap(), "pex");
+        assert_eq!(
+            fs::read_to_string(game_path.join("skse64_loader.exe")).unwrap(),
+            "exe"
+        );
+        assert_eq!(
+            fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(),
+            "modded"
+        );
+        assert_eq!(
+            fs::read_to_string(game_path.join("Data/Scripts/Test.pex")).unwrap(),
+            "pex"
+        );
         assert!(!game_path.join("Data/skse64_loader.exe").exists());
 
         // Same name in Data from another mod is a different file, not a conflict.
         let other = t.path().join("other.zip");
-        zip(&other, &[("Data/skse64_loader.exe", "data"), ("Data/Scripts/Test.pex", "other")]);
+        zip(
+            &other,
+            &[
+                ("Data/skse64_loader.exe", "data"),
+                ("Data/Scripts/Test.pex", "other"),
+            ],
+        );
         let s = m.stage(&other).unwrap();
         m.install(s, None).unwrap();
-        assert_eq!(fs::read_to_string(game_path.join("skse64_loader.exe")).unwrap(), "exe");
+        assert_eq!(
+            fs::read_to_string(game_path.join("skse64_loader.exe")).unwrap(),
+            "exe"
+        );
         assert_eq!(m.conflicts()["skse64"], vec!["other"]);
 
         // No binary beside Data: toggle defaults off, files kept for flipping it on later.
         let plain = t.path().join("plain.zip");
-        zip(&plain, &[("wrap/plain.txt", "r"), ("wrap/Data/meshes/a.nif", "n")]);
+        zip(
+            &plain,
+            &[("wrap/plain.txt", "r"), ("wrap/Data/meshes/a.nif", "n")],
+        );
         let s = m.stage(&plain).unwrap();
         m.install(s, None).unwrap();
         let p = m.state.mods.iter().find(|x| x.id == "plain").unwrap();
         assert!(!p.game_root && p.root_files == ["plain.txt"]);
         assert!(!game_path.join("plain.txt").exists());
         m.set_game_root("plain", true).unwrap();
-        assert_eq!(fs::read_to_string(game_path.join("plain.txt")).unwrap(), "r");
+        assert_eq!(
+            fs::read_to_string(game_path.join("plain.txt")).unwrap(),
+            "r"
+        );
         m.set_game_root("plain", false).unwrap();
         assert!(!game_path.join("plain.txt").exists());
 
         // Toggling off withdraws root files and restores the displaced game file.
         m.set_game_root("skse64", false).unwrap();
         assert!(!game_path.join("skse64_loader.exe").exists());
-        assert_eq!(fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(), "vanilla");
-        assert_eq!(fs::read_to_string(game_path.join("Data/Scripts/Test.pex")).unwrap(), "other");
+        assert_eq!(
+            fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(),
+            "vanilla"
+        );
+        assert_eq!(
+            fs::read_to_string(game_path.join("Data/Scripts/Test.pex")).unwrap(),
+            "other"
+        );
         m.set_game_root("skse64", true).unwrap();
 
-        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        let reopened =
+            Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
         assert!(reopened.state.deployed.contains_key("/skse64_loader.exe"));
 
         m.remove("skse64").unwrap();
         assert!(!game_path.join("skse64_loader.exe").exists());
-        assert_eq!(fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(), "vanilla");
+        assert_eq!(
+            fs::read_to_string(game_path.join("steam_api64.dll")).unwrap(),
+            "vanilla"
+        );
         assert!(!m.mods_dir.join("GameRootInstall/skse64").exists());
         assert!(!m.mods_dir.join("GameRootBackup/steam_api64.dll").exists());
     }
@@ -1423,12 +1962,20 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let game_path = t.path().join("game");
         fs::create_dir_all(&game_path).unwrap();
-        let mut m = Manager::open(crate::game::find("stardewvalley").unwrap(), game_path.clone(), t.path().join("mods")).unwrap();
+        let mut m = Manager::open(
+            crate::game::find("stardewvalley").unwrap(),
+            game_path.clone(),
+            t.path().join("mods"),
+        )
+        .unwrap();
         let z = t.path().join("Foo.zip");
         zip(&z, &[("Foo/manifest.json", "{}"), ("Foo/Foo.dll", "d")]);
         let s = m.stage(&z).unwrap();
         m.install(s, None).unwrap();
-        assert_eq!(fs::read_to_string(game_path.join("Mods/Foo/manifest.json")).unwrap(), "{}");
+        assert_eq!(
+            fs::read_to_string(game_path.join("Mods/Foo/manifest.json")).unwrap(),
+            "{}"
+        );
         assert!(game_path.join("Mods/Foo/Foo.dll").exists());
         m.remove("Foo").unwrap();
         assert!(!game_path.join("Mods").exists());
@@ -1445,8 +1992,12 @@ mod tests {
         let s = m.stage(&z).unwrap();
         m.install(s, None).unwrap();
         assert!(m.state.mods[0].game_root);
-        assert!(game_path.join("OblivionRemastered/Binaries/Win64/OBSE/Plugins/x.dll").exists());
-        assert!(game_path.join("OblivionRemastered/Content/Dev/ObvData/Data/A.esp").exists());
+        assert!(game_path
+            .join("OblivionRemastered/Binaries/Win64/OBSE/Plugins/x.dll")
+            .exists());
+        assert!(game_path
+            .join("OblivionRemastered/Content/Dev/ObvData/Data/A.esp")
+            .exists());
     }
 
     #[test]
@@ -1456,7 +2007,12 @@ mod tests {
         let settings = game_path.join("Binaries/SETTINGS/GCMODSETTINGS.MXML");
         fs::create_dir_all(settings.parent().unwrap()).unwrap();
         fs::write(&settings, "cache").unwrap();
-        let mut m = Manager::open(crate::game::find("NoMansSky").unwrap(), game_path.clone(), t.path().join("mods")).unwrap();
+        let mut m = Manager::open(
+            crate::game::find("NoMansSky").unwrap(),
+            game_path.clone(),
+            t.path().join("mods"),
+        )
+        .unwrap();
         for name in ["Alpha", "Beta"] {
             let z = t.path().join(format!("{name}.zip"));
             zip(&z, &[(&format!("{name}/MODELS/a.mbin"), name)]);
@@ -1464,20 +2020,27 @@ mod tests {
             m.install(s, None).unwrap();
         }
         let mods = game_path.join("GAMEDATA/MODS");
-        assert_eq!(fs::read_to_string(mods.join("0000_Alpha/MODELS/a.mbin")).unwrap(), "Alpha");
+        assert_eq!(
+            fs::read_to_string(mods.join("0000_Alpha/MODELS/a.mbin")).unwrap(),
+            "Alpha"
+        );
         assert!(mods.join("0001_Beta/MODELS/a.mbin").exists());
         assert!(!settings.exists());
         assert!(m.conflicts().is_empty());
 
         m.reorder("Beta", -1).unwrap();
         assert!(mods.join("0000_Beta/MODELS/a.mbin").exists());
-        assert_eq!(fs::read_to_string(mods.join("0001_Alpha/MODELS/a.mbin")).unwrap(), "Alpha");
+        assert_eq!(
+            fs::read_to_string(mods.join("0001_Alpha/MODELS/a.mbin")).unwrap(),
+            "Alpha"
+        );
         assert!(!mods.join("0000_Alpha").exists() && !mods.join("0001_Beta").exists());
 
         // Disabling a mod doesn't renumber the others.
         m.set_active("Beta", false).unwrap();
         assert!(mods.join("0001_Alpha/MODELS/a.mbin").exists());
-        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        let reopened =
+            Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
         assert_eq!(reopened.state.deployed.len(), 1);
         m.remove("Alpha").unwrap();
         assert!(!mods.join("0001_Alpha").exists());
@@ -1505,19 +2068,35 @@ mod tests {
         game.gamebryo = None;
         let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
         let names = |p: &Path| {
-            let mut v: Vec<String> = fs::read_dir(p).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+            let mut v: Vec<String> = fs::read_dir(p)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into())
+                .collect();
             v.sort();
             v
         };
 
         let z = t.path().join("ModA.zip");
-        zip(&z, &[("Textures/SKY.dds", "A"), ("Textures/Sub/new.dds", "n"), ("skyrim.esm", "patched")]);
+        zip(
+            &z,
+            &[
+                ("Textures/SKY.dds", "A"),
+                ("Textures/Sub/new.dds", "n"),
+                ("skyrim.esm", "patched"),
+            ],
+        );
         let s = m.stage(&z).unwrap();
         m.install(s, None).unwrap();
         assert_eq!(names(&data), ["Skyrim.esm", "textures"]);
         assert_eq!(names(&data.join("textures")), ["Sub", "sky.dds"]);
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
-        assert_eq!(fs::read_to_string(data.join("Skyrim.esm")).unwrap(), "patched");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "A"
+        );
+        assert_eq!(
+            fs::read_to_string(data.join("Skyrim.esm")).unwrap(),
+            "patched"
+        );
         assert_eq!(m.file_state("SKYRIM.ESM"), "Active");
 
         // A second mod with yet another casing joins the same tree.
@@ -1531,9 +2110,17 @@ mod tests {
         m.remove("ModB").unwrap();
         assert_eq!(names(&data), ["Skyrim.esm", "textures"]);
         assert_eq!(names(&data.join("textures")), ["sky.dds"]);
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
-        assert_eq!(fs::read_to_string(data.join("Skyrim.esm")).unwrap(), "master");
-        assert!(!m.mods_dir.join("Backup").exists() || names(&m.mods_dir.join("Backup")).is_empty());
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "vanilla"
+        );
+        assert_eq!(
+            fs::read_to_string(data.join("Skyrim.esm")).unwrap(),
+            "master"
+        );
+        assert!(
+            !m.mods_dir.join("Backup").exists() || names(&m.mods_dir.join("Backup")).is_empty()
+        );
     }
 
     #[cfg(unix)]
@@ -1552,40 +2139,69 @@ mod tests {
         let mut m = Manager::open(game, t.path().join("game"), t.path().join("mods")).unwrap();
         assert!(m.same_volume());
         let z = t.path().join("ModA.zip");
-        zip(&z, &[("textures/sky.dds", "A"), ("sound/a.ogg", "o"), ("a.dll", "d")]);
+        zip(
+            &z,
+            &[
+                ("textures/sky.dds", "A"),
+                ("sound/a.ogg", "o"),
+                ("a.dll", "d"),
+            ],
+        );
         let s = m.stage(&z).unwrap();
         m.install(s, None).unwrap();
 
         let ino = |p: &Path| fs::metadata(p).unwrap().ino();
         let is_link = |p: &str| fs::symlink_metadata(data.join(p)).unwrap().is_symlink();
-        let hard = |m: &Manager, p: &str| ino(&data.join(p)) == ino(&m.mods_dir.join("VirtualInstall/ModA").join(p));
+        let hard = |m: &Manager, p: &str| {
+            ino(&data.join(p)) == ino(&m.mods_dir.join("VirtualInstall/ModA").join(p))
+        };
 
         // Auto: hardlinks, except real-copy files.
         assert!(hard(&m, "textures/sky.dds") && hard(&m, "sound/a.ogg") && !hard(&m, "a.dll"));
 
         m.set_link_mode(LinkMode::Symlink).unwrap();
         assert!(is_link("textures/sky.dds"));
-        assert!(!is_link("sound/a.ogg") && hard(&m, "sound/a.ogg"), "hardlink-required ext stays a hardlink");
+        assert!(
+            !is_link("sound/a.ogg") && hard(&m, "sound/a.ogg"),
+            "hardlink-required ext stays a hardlink"
+        );
         assert!(!is_link("a.dll") && !hard(&m, "a.dll"));
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "A"
+        );
 
         m.set_link_mode(LinkMode::Copy).unwrap();
         assert!(!is_link("textures/sky.dds") && !hard(&m, "textures/sky.dds"));
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "A"
+        );
 
         m.set_link_mode(LinkMode::Hardlink).unwrap();
         assert!(hard(&m, "textures/sky.dds"));
-        let reopened = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        let reopened =
+            Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
         assert_eq!(reopened.state.link_mode, LinkMode::Hardlink);
 
         // Symlinked mods still uninstall cleanly and give the game file back.
         m.set_link_mode(LinkMode::Symlink).unwrap();
         m.remove("ModA").unwrap();
-        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
+        assert_eq!(
+            fs::read_to_string(data.join("textures/sky.dds")).unwrap(),
+            "vanilla"
+        );
         assert!(!data.join("sound").exists() && !data.join("a.dll").exists());
 
         // Strict hardlink reports a failed link instead of quietly copying.
-        let e = place_file(&t.path().join("missing"), &t.path().join("out"), LinkMode::Hardlink, false, false).unwrap_err();
+        let e = place_file(
+            &t.path().join("missing"),
+            &t.path().join("out"),
+            LinkMode::Hardlink,
+            false,
+            false,
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("hardlink mode"), "{e}");
     }
 
@@ -1598,7 +2214,10 @@ mod tests {
             eprintln!("skipped: NMM_TEST_OTHER_VOLUME not set");
             return;
         };
-        let (g, t) = (tempfile::tempdir_in(other).unwrap(), tempfile::tempdir().unwrap());
+        let (g, t) = (
+            tempfile::tempdir_in(other).unwrap(),
+            tempfile::tempdir().unwrap(),
+        );
         let data = g.path().join("Data");
         fs::create_dir_all(data.join("textures")).unwrap();
         fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
@@ -1613,7 +2232,10 @@ mod tests {
         m.install(s, None).unwrap();
         let sky = data.join("textures/sky.dds");
         assert_eq!(fs::read_to_string(&sky).unwrap(), "A");
-        assert!(!fs::symlink_metadata(&sky).unwrap().is_symlink(), "auto copies across volumes");
+        assert!(
+            !fs::symlink_metadata(&sky).unwrap().is_symlink(),
+            "auto copies across volumes"
+        );
 
         m.set_link_mode(LinkMode::Symlink).unwrap();
         assert!(fs::symlink_metadata(&sky).unwrap().is_symlink());

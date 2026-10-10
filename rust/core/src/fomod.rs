@@ -48,7 +48,10 @@ pub struct Plugin {
 #[derive(Debug, Clone)]
 pub enum TypeDesc {
     Static(String),
-    Dependent { default: String, patterns: Vec<(Cond, String)> },
+    Dependent {
+        default: String,
+        patterns: Vec<(Cond, String)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -86,7 +89,13 @@ fn decode(bytes: &[u8]) -> String {
             .as_chunks::<2>()
             .0
             .iter()
-            .map(|&c| if le { u16::from_le_bytes(c) } else { u16::from_be_bytes(c) })
+            .map(|&c| {
+                if le {
+                    u16::from_le_bytes(c)
+                } else {
+                    u16::from_be_bytes(c)
+                }
+            })
             .collect();
         String::from_utf16_lossy(&units)
     };
@@ -137,7 +146,11 @@ fn parse_cond(n: Node) -> Cond {
             _ => Cond::True,
         })
         .collect();
-    if n.attribute("operator") == Some("Or") { Cond::Any(parts) } else { Cond::All(parts) }
+    if n.attribute("operator") == Some("Or") {
+        Cond::Any(parts)
+    } else {
+        Cond::All(parts)
+    }
 }
 
 fn parse_files(n: Option<Node>) -> Vec<FileItem> {
@@ -147,17 +160,25 @@ fn parse_files(n: Option<Node>) -> Vec<FileItem> {
         .map(|c| {
             let source = c.attribute("source").unwrap_or("").replace('\\', "/");
             FileItem {
-                destination: c.attribute("destination").map(|d| d.replace('\\', "/")).unwrap_or_else(|| source.clone()),
+                destination: c
+                    .attribute("destination")
+                    .map(|d| d.replace('\\', "/"))
+                    .unwrap_or_else(|| source.clone()),
                 source,
                 is_folder: c.has_tag_name("folder"),
-                priority: c.attribute("priority").and_then(|p| p.parse().ok()).unwrap_or(0),
+                priority: c
+                    .attribute("priority")
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(0),
             }
         })
         .collect()
 }
 
 fn type_name(n: Option<Node>) -> String {
-    n.and_then(|n| n.attribute("name")).unwrap_or("Optional").to_string()
+    n.and_then(|n| n.attribute("name"))
+        .unwrap_or("Optional")
+        .to_string()
 }
 
 fn parse_plugin(p: Node) -> Plugin {
@@ -169,8 +190,12 @@ fn parse_plugin(p: Node) -> Plugin {
                 .map(|ps| {
                     children(ps, "pattern")
                         .map(|pt| {
-                            let deps = child(pt, "dependencies").or_else(|| child(pt, "dependancies"));
-                            (deps.map(parse_cond).unwrap_or(Cond::True), type_name(child(pt, "type")))
+                            let deps =
+                                child(pt, "dependencies").or_else(|| child(pt, "dependancies"));
+                            (
+                                deps.map(parse_cond).unwrap_or(Cond::True),
+                                type_name(child(pt, "type")),
+                            )
                         })
                         .collect()
                 })
@@ -181,12 +206,19 @@ fn parse_plugin(p: Node) -> Plugin {
     Plugin {
         name: p.attribute("name").unwrap_or("").into(),
         description: text(child(p, "description")),
-        image: child(p, "image").and_then(|i| i.attribute("path")).map(|s| s.replace('\\', "/")),
+        image: child(p, "image")
+            .and_then(|i| i.attribute("path"))
+            .map(|s| s.replace('\\', "/")),
         files: parse_files(child(p, "files")),
         flags: child(p, "conditionFlags")
             .map(|f| {
                 children(f, "flag")
-                    .map(|fl| (fl.attribute("name").unwrap_or("").into(), fl.text().unwrap_or("").into()))
+                    .map(|fl| {
+                        (
+                            fl.attribute("name").unwrap_or("").into(),
+                            fl.text().unwrap_or("").into(),
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default(),
@@ -198,8 +230,14 @@ fn parse_groups(n: Node) -> Vec<Group> {
     let mut groups: Vec<Group> = children(n, "group")
         .map(|g| {
             let plugins_el = child(g, "plugins");
-            let mut plugins: Vec<Plugin> = plugins_el.map(|ps| children(ps, "plugin").map(parse_plugin).collect()).unwrap_or_default();
-            sort_by_order(&mut plugins, plugins_el.and_then(|p| p.attribute("order")), |p| p.name.clone());
+            let mut plugins: Vec<Plugin> = plugins_el
+                .map(|ps| children(ps, "plugin").map(parse_plugin).collect())
+                .unwrap_or_default();
+            sort_by_order(
+                &mut plugins,
+                plugins_el.and_then(|p| p.attribute("order")),
+                |p| p.name.clone(),
+            );
             Group {
                 name: g.attribute("name").unwrap_or("").into(),
                 kind: g.attribute("type").unwrap_or("SelectAny").into(),
@@ -213,8 +251,14 @@ fn parse_groups(n: Node) -> Vec<Group> {
 
 pub fn parse(xml_bytes: &[u8]) -> crate::Result<ModuleConfig> {
     let xml = decode(xml_bytes);
-    let doc = roxmltree::Document::parse_with_options(&xml, roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() })
-        .map_err(|e| format!("fomod/ModuleConfig.xml: {e}"))?;
+    let doc = roxmltree::Document::parse_with_options(
+        &xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| format!("fomod/ModuleConfig.xml: {e}"))?;
     let root = doc.root_element();
 
     let mut steps: Vec<Step> = match child(root, "installSteps") {
@@ -223,7 +267,9 @@ pub fn parse(xml_bytes: &[u8]) -> crate::Result<ModuleConfig> {
                 .map(|st| Step {
                     name: st.attribute("name").unwrap_or("").into(),
                     visible: child(st, "visible").map(parse_cond),
-                    groups: child(st, "optionalFileGroups").map(parse_groups).unwrap_or_default(),
+                    groups: child(st, "optionalFileGroups")
+                        .map(parse_groups)
+                        .unwrap_or_default(),
                 })
                 .collect();
             sort_by_order(&mut s, is.attribute("order"), |s| s.name.clone());
@@ -231,7 +277,13 @@ pub fn parse(xml_bytes: &[u8]) -> crate::Result<ModuleConfig> {
         }
         // Pre-3.0 configs: groups hang off the root.
         None => child(root, "optionalFileGroups")
-            .map(|g| vec![Step { name: "Options".into(), visible: None, groups: parse_groups(g) }])
+            .map(|g| {
+                vec![Step {
+                    name: "Options".into(),
+                    visible: None,
+                    groups: parse_groups(g),
+                }]
+            })
             .unwrap_or_default(),
     };
     steps.retain(|s| !s.groups.is_empty());
@@ -242,7 +294,10 @@ pub fn parse(xml_bytes: &[u8]) -> crate::Result<ModuleConfig> {
             children(ps, "pattern")
                 .map(|p| {
                     let deps = child(p, "dependencies").or_else(|| child(p, "dependancies"));
-                    (deps.map(parse_cond).unwrap_or(Cond::True), parse_files(child(p, "files")))
+                    (
+                        deps.map(parse_cond).unwrap_or(Cond::True),
+                        parse_files(child(p, "files")),
+                    )
                 })
                 .collect()
         })
@@ -282,7 +337,11 @@ impl ModuleConfig {
             visible.push(vis);
             if vis {
                 for &(_, gi, pi) in sel.iter().filter(|s| s.0 == si) {
-                    if let Some(p) = self.steps[si].groups.get(gi).and_then(|g| g.plugins.get(pi)) {
+                    if let Some(p) = self.steps[si]
+                        .groups
+                        .get(gi)
+                        .and_then(|g| g.plugins.get(pi))
+                    {
                         flags.extend(p.flags.iter().cloned());
                     }
                 }
@@ -325,7 +384,11 @@ impl ModuleConfig {
         let mut out = self.required.clone();
         for &(si, gi, pi) in sel {
             if visible.get(si) == Some(&true) {
-                if let Some(p) = self.steps[si].groups.get(gi).and_then(|g| g.plugins.get(pi)) {
+                if let Some(p) = self.steps[si]
+                    .groups
+                    .get(gi)
+                    .and_then(|g| g.plugins.get(pi))
+                {
                     out.extend(p.files.iter().cloned());
                 }
             }
@@ -348,9 +411,17 @@ pub fn locate(root: &Path) -> Option<(PathBuf, PathBuf)> {
         .filter_map(Result::ok)
         .find(|e| {
             e.file_name().eq_ignore_ascii_case("moduleconfig.xml")
-                && e.path().parent().and_then(|p| p.file_name()).is_some_and(|n| n.eq_ignore_ascii_case("fomod"))
+                && e.path()
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|n| n.eq_ignore_ascii_case("fomod"))
         })
-        .map(|e| (e.path().parent().unwrap().parent().unwrap().to_path_buf(), e.into_path()))
+        .map(|e| {
+            (
+                e.path().parent().unwrap().parent().unwrap().to_path_buf(),
+                e.into_path(),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -397,14 +468,26 @@ mod tests {
         bytes.extend(XML.encode_utf16().flat_map(|u| u.to_le_bytes()));
         let cfg = parse(&bytes).unwrap();
         assert_eq!(cfg.name, "Test");
-        let fs = |f: &str| if f == "Dawnguard.esm" { "Active".into() } else { "Missing".into() };
+        let fs = |f: &str| {
+            if f == "Dawnguard.esm" {
+                "Active".into()
+            } else {
+                "Missing".into()
+            }
+        };
 
         let cbbe: Selection = vec![(0, 0, 0)];
         let e = cfg.evaluate(&cbbe, &fs);
         assert_eq!(e.visible, vec![true, true]);
         assert_eq!(e.types[1][0][0], "Required");
         let files = cfg.files(&cbbe, &fs);
-        assert_eq!(files.iter().map(|f| f.destination.as_str()).collect::<Vec<_>>(), ["", "meshes/body.nif"]);
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| f.destination.as_str())
+                .collect::<Vec<_>>(),
+            ["", "meshes/body.nif"]
+        );
 
         let unp: Selection = vec![(0, 0, 1), (1, 0, 0)];
         assert_eq!(cfg.evaluate(&unp, &fs).visible, vec![true, false]);
