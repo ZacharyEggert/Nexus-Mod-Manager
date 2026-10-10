@@ -36,6 +36,8 @@ export interface Library {
   link_mode: LinkMode;
   same_volume: boolean;
   in_sync: boolean;
+  /** Stored mod folders missing from the list; `adopt` re-adds them. */
+  strays: string[];
 }
 
 export interface RepairReport {
@@ -145,6 +147,7 @@ export const stage = (mode: string, archive: string) => call<StageResult>('stage
 export const fomodInstall = (token: string, sel: Selection) => call<void>('fomod_install', { token, sel });
 export const apply = (mode: string, op: Op) => call<void>('apply', { mode, op });
 export const repair = (mode: string) => call<RepairReport>('repair', { mode });
+export const adopt = (mode: string) => call<RepairReport>('adopt', { mode });
 
 /** What a task rejects with when cancelled. */
 export const CANCELLED = 'cancelled';

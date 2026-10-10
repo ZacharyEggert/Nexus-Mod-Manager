@@ -855,6 +855,43 @@ impl Manager {
         Ok(())
     }
 
+    /// Mod folders in the store with no entry in the mod list, e.g. after `state.json` was lost.
+    pub fn strays(&self) -> Vec<String> {
+        let mut ids = std::collections::BTreeSet::new();
+        for dir in ["VirtualInstall", "GameRootInstall"] {
+            let entries = fs::read_dir(self.mods_dir.join(dir)).into_iter().flatten().filter_map(Result::ok);
+            ids.extend(entries.filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()));
+        }
+        ids.retain(|id| !self.state.mods.iter().any(|m| &m.id == id) && !self.mods_dir.join(".pending").join(id).exists());
+        ids.into_iter().collect()
+    }
+
+    /// Re-add every stray mod folder, appended in name order, then scan the game: mods whose
+    /// files are already live come back enabled (and are completed), the rest stay off.
+    // ponytail: name = folder id, no archive; the original names lived only in state.json.
+    pub fn adopt(&mut self) -> R<RepairReport> {
+        let ids = self.strays();
+        let list = |dir: PathBuf| {
+            let mut v: Vec<_> = files_under(&dir).iter().map(|f| rel(f, &dir)).collect();
+            v.sort_by_key(|f| f.to_lowercase()); // install's order
+            v
+        };
+        for id in &ids {
+            let (files, root_files) = (list(self.virtual_dir(id)), list(self.mods_dir.join("GameRootInstall").join(id)));
+            self.state.mods.push(ModEntry { id: id.clone(), name: id.clone(), archive: String::new(), files, root_files, game_root: false, active: false });
+        }
+        let report = self.scan()?;
+        let live: Vec<(String, bool)> = self.state.deployed.values().map(|d| (d.mod_id.clone(), d.game_root)).collect();
+        for m in self.state.mods.iter_mut().filter(|m| ids.contains(&m.id)) {
+            m.active = live.iter().any(|(id, _)| *id == m.id);
+            m.game_root = live.iter().any(|(id, root)| *id == m.id && *root);
+        }
+        tracing::info!(?ids, "re-added stray mods");
+        self.finish()?;
+        self.deploy()?;
+        Ok(report)
+    }
+
     /// Last resort for a lost or unreadable `deploy.journal`: `reconcile` every path any mod,
     /// `deployed` or a backup knows, then redeploy the saved intent.
     pub fn repair(&mut self) -> R<RepairReport> {
@@ -866,7 +903,8 @@ impl Manager {
 
     fn scan(&mut self) -> R<RepairReport> {
         // A path nothing recorded and nothing backed up may be a game file that happens to equal
-        // a mod's: count it as deployed only when it's provably a link, never by content.
+        // a mod's: count it as deployed only when it's provably a link, or its mod provably has
+        // other files live (copy-only files like .exe can't be proven links), never by content alone.
         let mut trusted: std::collections::HashSet<String> = self.state.deployed.keys().cloned().collect();
         let backups = self.backups();
         trusted.extend(backups.iter().map(|(g, p)| key(p, *g)));
@@ -874,7 +912,16 @@ impl Manager {
         let links: Vec<_> = (self.wanted().into_iter().rev().chain(self.state.deployed.clone()).chain(all.into_iter().rev()))
             .map(|(k, d)| {
                 let p = self.place(&d);
-                let live = trusted.contains(&k) || same_file(&p.src, &p.target);
+                let linked = same_file(&p.src, &p.target);
+                (k, d, linked)
+            })
+            .collect();
+        let mut proven: std::collections::HashSet<String> = self.state.deployed.values().map(|d| d.mod_id.clone()).collect();
+        proven.extend(links.iter().filter(|(_, _, linked)| *linked).map(|(_, d, _)| d.mod_id.clone()));
+        let links: Vec<_> = links
+            .into_iter()
+            .map(|(k, d, linked)| {
+                let live = linked || trusted.contains(&k) || proven.contains(&d.mod_id);
                 (k, d, live)
             })
             .collect();
@@ -1255,6 +1302,54 @@ mod tests {
         assert_eq!(read(&data.join("textures/patched.dds")), "v2");
         assert!(!data.join("textures/a.dds").exists() && !backup.exists());
         assert!(data.join("textures/same.dds").exists() && data.join("textures/gone.dds").exists());
+    }
+
+    /// state.json and its backup both lost: the stored mods are offered back; adopting them
+    /// re-enables only the one whose files are live, and deploys nothing for the other.
+    #[test]
+    fn adopt_rebuilds_lost_library() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(data.join("textures")).unwrap();
+        fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
+        for (name, files) in [
+            ("ModB", &[("textures/sky.dds", "B"), ("textures/b.dds", "b")][..]),
+            // loader.exe is always copied (realFileRequired), so only proven live via its siblings.
+            ("ModA", &[("x/loader.exe", "exe"), ("x/readme.txt", "r"), ("x/Data/Scripts/a.pex", "p"), ("x/Data/textures/sky.dds", "A")]),
+        ] {
+            let z = t.path().join(format!("{name}.zip"));
+            zip(&z, files);
+            m.install(m.stage(&z).unwrap(), None).unwrap();
+        }
+        m.set_active("ModB", false).unwrap();
+        let (files, deployed) = (m.state.mods.iter().map(|x| (x.files.clone(), x.root_files.clone())).collect::<Vec<_>>(), m.state.deployed.clone());
+        fs::remove_file(m.mods_dir.join("state.json")).unwrap();
+        fs::remove_file(m.mods_dir.join("state.json.bak")).unwrap();
+
+        let mut m = Manager::open(m.game.clone(), m.game_path.clone(), m.mods_dir.clone()).unwrap();
+        assert!(m.state.mods.is_empty());
+        assert_eq!(m.strays(), ["ModA", "ModB"]);
+        assert_eq!(m.adopt().unwrap(), RepairReport::default());
+        assert!(m.strays().is_empty() && m.in_sync());
+        let got: Vec<_> = m.state.mods.iter().map(|x| (x.id.as_str(), x.active, x.game_root)).collect();
+        assert_eq!(got, [("ModA", true, true), ("ModB", false, false)]);
+        let mut got_files: Vec<_> = m.state.mods.iter().map(|x| (x.files.clone(), x.root_files.clone())).collect();
+        got_files.reverse();
+        assert_eq!(got_files, files);
+        assert_eq!(m.state.deployed, deployed);
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "A");
+        assert!(!data.join("textures/b.dds").exists() && game_path.join("loader.exe").exists());
+
+        m.set_active("ModA", false).unwrap();
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "vanilla");
+        assert!(!game_path.join("loader.exe").exists() && !m.mods_dir.join("GameRootBackup").exists());
+        m.set_active("ModB", true).unwrap();
+        assert_eq!(fs::read_to_string(data.join("textures/sky.dds")).unwrap(), "B");
     }
 
     #[test]

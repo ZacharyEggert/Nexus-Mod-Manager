@@ -288,6 +288,8 @@ struct Library {
     link_mode: LinkMode,
     same_volume: bool,
     in_sync: bool,
+    /// Stored mod folders missing from the list (state.json lost); `adopt` re-adds them.
+    strays: Vec<String>,
 }
 
 #[tauri::command]
@@ -295,6 +297,7 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
     let m = read(&app, &mode)?;
     Ok(Library {
         in_sync: m.in_sync(),
+        strays: m.strays(),
         conflicts: m.conflicts(),
         install_root: m.install_root(),
         link_mode: m.state.link_mode,
@@ -444,6 +447,18 @@ fn repair(app: AppHandle, id: String, mode: String) {
     });
 }
 
+/// Task: re-add stray mod folders; ones already live in the game come back enabled.
+#[tauri::command]
+fn adopt(app: AppHandle, id: String, mode: String) {
+    spawn(&app, id, mode.clone(), "adopt stray mods".into(), move |app, task| {
+        let mut m = manager(app, &mode)?;
+        m.task = task;
+        let mut report = None;
+        m.transact(|m| m.adopt().map(|r| report = Some(r)))?;
+        Ok(report.unwrap_or_default())
+    });
+}
+
 #[tauri::command]
 async fn launch(app: AppHandle, mode: String) -> R<()> {
     // read() waits for this game's tasks, so the game never starts mid-deploy.
@@ -504,7 +519,7 @@ fn main() {
         .manage(App::default())
         .invoke_handler(tauri::generate_handler![
             games, configure, library, pick_archive, pick_folder, stage, fomod_eval, fomod_image, fomod_install,
-            fomod_cancel, apply, repair, launch, cancel, settings, save_settings
+            fomod_cancel, apply, repair, adopt, launch, cancel, settings, save_settings
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
