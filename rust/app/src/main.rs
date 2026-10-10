@@ -566,6 +566,8 @@ struct Library {
     nexus_checked: Option<u64>,
     /// The game has a plugin load order (Plugins tab).
     uses_plugins: bool,
+    /// LOOT can sort its plugins.
+    loot: bool,
 }
 
 #[tauri::command]
@@ -582,6 +584,7 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
         categories: categories(&m).into_iter().map(|c| (c.id, c.name)).collect(),
         nexus_checked: m.state.nexus_checked,
         uses_plugins: nmm_core::plugins::Policy::new(&m.game, &m.game_path).is_some(),
+        loot: nmm_core::loot::supported(&m.game.mode_id),
         mods: m.state.mods,
     })
 }
@@ -602,6 +605,14 @@ async fn plugins_set(app: AppHandle, mode: String, plugins: Vec<Plugin>) -> R<Ve
         manager(&app, &mode)?.set_plugins(&plugins)
     })
     .await
+}
+
+/// Task: LOOT's proposed order (refreshing a stale masterlist first); applied via `plugins_set`.
+#[tauri::command]
+fn loot_preview(app: AppHandle, id: String, mode: String) {
+    spawn(&app, id, mode.clone(), "LOOT sort".into(), move |app, _| {
+        manager(app, &mode)?.loot_preview()
+    });
 }
 
 // ---------- Nexus metadata, categories, update checks ----------
@@ -1159,6 +1170,7 @@ fn main() {
             library,
             plugins,
             plugins_set,
+            loot_preview,
             pick_archive,
             pick_folder,
             stage,

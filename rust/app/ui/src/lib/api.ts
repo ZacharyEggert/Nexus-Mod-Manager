@@ -70,6 +70,15 @@ export interface Library {
   nexus_checked: number | null;
   /** The game has a plugin load order (Plugins tab). */
   uses_plugins: boolean;
+  /** LOOT can sort its plugins. */
+  loot: boolean;
+}
+
+export interface LootPreview {
+  current: string[];
+  sorted: string[];
+  /** Why the masterlist wasn't refreshed, if it wasn't. */
+  note: string | null;
 }
 
 export interface Plugin {
@@ -289,6 +298,7 @@ export const stage = (mode: string, archive: string, download: string | null = n
 export const nexusCheck = (mode: string) => call<CheckReport>('nexus_check', { mode });
 export const fomodInstall = (token: string, sel: Selection) => call<void>('fomod_install', { token, sel });
 export const apply = (mode: string, op: Op) => call<void>('apply', { mode, op });
+export const lootPreview = (mode: string) => call<LootPreview>('loot_preview', { mode });
 export const repair = (mode: string) => call<RepairReport>('repair', { mode });
 export const adopt = (mode: string) => call<RepairReport>('adopt', { mode });
 export const nexusLogin = () => call<NexusUser>('nexus_login', {});

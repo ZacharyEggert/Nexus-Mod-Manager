@@ -65,3 +65,5 @@ button.badge { border:1px solid var(--warn); color:var(--warn); background:none;
 .plugins .details { width:260px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:13px; }
 .plugins .details h3 { margin:0 0 6px; font-size:14px; word-break:break-all; }
 .small { font-size:12px; }
+.loot { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 14px; margin-bottom:12px; }
+.loot ol { max-height:200px; overflow:auto; margin:6px 0 10px; }

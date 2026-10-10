@@ -4,6 +4,7 @@ pub mod discover;
 pub mod download;
 pub mod fomod;
 pub mod game;
+pub mod loot;
 pub mod manager;
 pub mod nexus;
 pub mod plugins;

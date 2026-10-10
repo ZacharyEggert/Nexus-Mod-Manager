@@ -13,7 +13,7 @@
 use crate::adjust::{self, Dest};
 use crate::fomod::{self, ModuleConfig, Selection};
 use crate::game::{has_ext, GameDef};
-use crate::plugins;
+use crate::{loot, plugins};
 use crate::{write_durable, Error, IoContext, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -151,6 +151,15 @@ pub struct PluginRow {
     pub locked_active: bool,
     /// Installed mod that deployed it; None for game files and plugins added outside NMM.
     pub owner: Option<String>,
+}
+
+/// A LOOT sort to review before applying.
+#[derive(Debug, Clone, Serialize)]
+pub struct LootPreview {
+    pub current: Vec<String>,
+    pub sorted: Vec<String>,
+    /// Why the masterlist wasn't refreshed, if it wasn't.
+    pub note: Option<String>,
 }
 
 /// Extracted archive waiting to be installed.
@@ -1405,6 +1414,48 @@ impl Manager {
         Ok(self.plugin_rows(&policy, entries))
     }
 
+    /// LOOT's proposed order next to the current one, for a preview before applying it with
+    /// `set_plugins`. Refreshes the masterlist first when it's missing or a day old; if that
+    /// fails the sort goes on with the cached one (or masters only) and `note` says so.
+    pub fn loot_preview(&self) -> R<LootPreview> {
+        let policy = plugins::Policy::new(&self.game, &self.game_path)
+            .ok_or("this game doesn't use plugins")?;
+        let mode = &self.game.mode_id;
+        let dir = self.mods_dir.join("loot");
+        let age = loot::masterlist_age(&dir);
+        let mut note = None;
+        if age.is_none_or(|a| a > loot::MAX_AGE) {
+            if let Err(e) = loot::update_masterlist(mode, &dir) {
+                tracing::warn!("LOOT masterlist update failed: {e}");
+                note = Some(format!(
+                    "Couldn't update the LOOT masterlist ({e}); {}.",
+                    if age.is_some() {
+                        "used the saved one"
+                    } else {
+                        "sorted by masters only"
+                    }
+                ));
+            }
+        }
+        let list = policy.read();
+        let current: Vec<String> = list.iter().map(|p| p.name.clone()).collect();
+        let order = loot::sort(mode, &policy, &self.game_path, &dir, &current)?;
+        // Show what applying gives: the game's own rules still win over LOOT.
+        let mut sorted: Vec<plugins::Plugin> = order
+            .into_iter()
+            .map(|name| plugins::Plugin {
+                name,
+                active: false,
+            })
+            .collect();
+        policy.correct(&mut sorted, &policy.headers(&list));
+        Ok(LootPreview {
+            current,
+            sorted: sorted.into_iter().map(|p| p.name).collect(),
+            note,
+        })
+    }
+
     /// Persist the plugin load order after a deploy. `added` are paths this deploy linked fresh:
     /// their plugins load last and start active (C# `IntegrateDeployedPlugins`); everything else
     /// keeps the order and state the game's files already hold.
@@ -1728,6 +1779,38 @@ mod tests {
         );
         // Activating a plugin whose master is off is refused.
         assert!(m.set_plugins(&[pl("Dep.esp", true)]).is_err());
+    }
+
+    #[test]
+    fn loot_preview_proposes_without_touching_the_game() {
+        use crate::plugins::tests::tes4;
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(data.join("Skyrim.esm"), tes4(1, &[], "")).unwrap();
+        fs::write(data.join("Patch.esp"), tes4(0, &["Skyrim.esm"], "")).unwrap();
+        fs::write(data.join("Mod.esp"), tes4(0, &["Skyrim.esm"], "")).unwrap();
+        let txt = t.path().join("plugins.txt");
+        fs::write(&txt, "*Patch.esp\r\n*Mod.esp\r\n").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let mods = t.path().join("mods");
+        // A fresh saved masterlist: no download.
+        fs::create_dir_all(mods.join("loot")).unwrap();
+        fs::write(
+            mods.join("loot/masterlist.yaml"),
+            "plugins:\n  - name: 'Patch.esp'\n    after: [ 'Mod.esp' ]\n",
+        )
+        .unwrap();
+        let m = Manager::open(game, game_path, mods).unwrap();
+        let before = fs::read_to_string(&txt).unwrap();
+        let p = m.loot_preview().unwrap();
+        assert_eq!(p.current, ["Skyrim.esm", "Patch.esp", "Mod.esp"]);
+        assert_eq!(p.sorted, ["Skyrim.esm", "Mod.esp", "Patch.esp"]);
+        assert_eq!(p.note, None);
+        assert_eq!(fs::read_to_string(&txt).unwrap(), before);
     }
 
     /// Cancel at the Nth progress step: extract leaves no staging junk; a cancelled install,

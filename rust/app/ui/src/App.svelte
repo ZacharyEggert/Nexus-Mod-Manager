@@ -206,7 +206,7 @@
           </div>
         {/if}
         {#if lib.uses_plugins && tab === 'plugins'}
-          <Plugins mode={view.mode} />
+          <Plugins mode={view.mode} loot={lib.loot} />
         {:else}
           <Library {lib} {op} {repair} />
         {/if}

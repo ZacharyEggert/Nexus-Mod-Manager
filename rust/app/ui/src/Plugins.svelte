@@ -2,14 +2,28 @@
   // Plugin load order for one game: drag or ▲▼ to reorder, tick to activate. Every change is
   // sent whole; the backend re-applies the game's rules and refuses changes that break the order.
   import * as api from './lib/api';
-  import { status } from './lib/ui.svelte';
+  import { runTask, status } from './lib/ui.svelte';
 
-  let { mode }: { mode: string } = $props();
+  let { mode, loot }: { mode: string; loot: boolean } = $props();
 
   let rows = $state<api.PluginRow[]>([]);
   let filter = $state('');
   let dragging = $state<string | null>(null);
   let selected = $state<string | null>(null);
+  let preview = $state<api.LootPreview | null>(null);
+  /** Plugins LOOT moves: new position, old position. */
+  const moves = $derived(preview ? preview.sorted.map((n, i) => ({ n, i, was: preview!.current.indexOf(n) })).filter((m) => m.i !== m.was) : []);
+
+  async function sortLoot() {
+    preview = await runTask('Sorting with LOOT', api.lootPreview(mode)).catch(() => null);
+    if (preview?.note) status(preview.note, true);
+  }
+
+  async function applyLoot() {
+    const active = new Map(rows.map((r) => [r.name, r.active]));
+    if (preview && (await save(preview.sorted.map((name) => ({ name, active: active.get(name) ?? false }))))) status('LOOT order applied');
+    preview = null;
+  }
 
   const shown = $derived(rows.filter((r) => !filter || r.name.toLowerCase().includes(filter.toLowerCase()) || r.owner?.toLowerCase().includes(filter.toLowerCase())));
   const used = (c: api.PluginRow['class']) => rows.filter((r) => r.active && r.class === c).length;
@@ -77,7 +91,23 @@
   <input type="text" placeholder="Filter" aria-label="Filter plugins" size="18" bind:value={filter} />
   <button class="btn" onclick={() => setAll(true)}>Enable all</button>
   <button class="btn" onclick={() => setAll(false)}>Disable all</button>
+  {#if loot}<button class="btn" onclick={sortLoot}>Sort with LOOT</button>{/if}
 </p>
+
+{#if preview}
+  <section class="loot" aria-label="LOOT sort preview">
+    {#if moves.length}
+      <p>LOOT moves {moves.length} plugin{moves.length === 1 ? '' : 's'}:</p>
+      <ol>
+        {#each moves as m (m.n)}<li>{m.n} <span class="muted">#{m.was + 1} → #{m.i + 1}</span></li>{/each}
+      </ol>
+      <button class="btn primary" onclick={applyLoot}>Apply</button>
+    {:else}
+      <p>Already in LOOT's order.</p>
+    {/if}
+    <button class="btn" onclick={() => (preview = null)}>{moves.length ? 'Discard' : 'Close'}</button>
+  </section>
+{/if}
 
 {#if rows.length}
   <div class="plugins">

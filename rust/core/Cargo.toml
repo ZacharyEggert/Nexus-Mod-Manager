@@ -20,6 +20,7 @@ tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 uuid = { version = "1.28.0", features = ["v4"] }
 md5 = "0.8.1"
 esplugin = "6"
+libloot = "0.29"
 
 [dev-dependencies]
 tempfile = "3"
