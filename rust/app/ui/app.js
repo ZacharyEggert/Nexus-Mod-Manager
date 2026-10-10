@@ -89,14 +89,15 @@ async function select(mode) {
   cur.game_path ? renderLibrary() : renderSetup();
 }
 
+const browse = (input) => h('button', { className: 'btn', textContent: 'Browse…', onclick: async () => {
+  const p = await invoke('pick_folder');
+  if (p) input.value = p;
+} });
+
 function renderSetup() {
   $('#tools').hidden = !cur.game_path;
   const gp = h('input', { type: 'text', id: 'gp', value: cur.game_path || cur.detected || '' });
-  const md = h('input', { type: 'text', id: 'md', value: cur.mods_dir || '', placeholder: 'Default (app data folder)' });
-  const browse = (input) => h('button', { className: 'btn', textContent: 'Browse…', onclick: async () => {
-    const p = await invoke('pick_folder');
-    if (p) input.value = p;
-  } });
+  const md = h('input', { type: 'text', id: 'md', value: cur.mods_dir || '', placeholder: 'Default (see App settings)' });
   $('#content').replaceChildren(
     h('div', { className: 'setup' },
       h('strong', { textContent: `Set up ${cur.name}` }),
@@ -110,6 +111,37 @@ function renderSetup() {
           select(cur.mode_id);
         } }))));
 }
+
+// ---------- app settings ----------
+
+async function renderAppSettings() {
+  cur = null;
+  lib = null;
+  $('#title').textContent = 'App settings';
+  $('#tools').hidden = true;
+  await loadGames();
+  const s = await invoke('settings');
+  const root = h('input', { type: 'text', id: 'mr', value: s.mods_root || '', placeholder: 'Default (app data folder)' });
+  const link = h('select', { id: 'lm' }, LINK_MODES.map(([v, t]) => h('option', { value: v, textContent: t, selected: v === s.link_mode })));
+  const api = h('select', { id: 'na' },
+    [['graphql', 'GraphQL (v2)'], ['rest', 'REST (v1)']].map(([v, t]) => h('option', { value: v, textContent: t, selected: v === s.nexus_api })));
+  const closeOnLaunch = h('input', { type: 'checkbox', id: 'col', checked: s.close_on_launch });
+  $('#content').replaceChildren(
+    h('div', { className: 'setup' },
+      h('strong', { textContent: 'App settings' }),
+      h('label', { htmlFor: 'mr', textContent: 'Mods folder for newly set-up games (each game gets a subfolder)' }),
+      h('div', { className: 'row' }, root, browse(root)),
+      h('label', { htmlFor: 'lm', textContent: 'Newly set-up games place mod files by' }), link,
+      h('label', { htmlFor: 'na', textContent: 'Nexus API' }), api,
+      h('p', {}, h('label', { className: 'sub' }, closeOnLaunch, ' Close Nexus Mod Manager after launching a game')),
+      h('p', {},
+        h('button', { className: 'btn primary', textContent: 'Save', onclick: () => run('Saving app settings', () => invoke('save_settings', {
+          settings: { mods_root: root.value.trim() || null, link_mode: link.value, nexus_api: api.value, close_on_launch: closeOnLaunch.checked },
+        })) })),
+      s.log_dir && h('p', { className: 'muted', textContent: `Logs: ${s.log_dir}` })));
+}
+
+$('#appsettings').onclick = renderAppSettings;
 
 // ---------- library ----------
 

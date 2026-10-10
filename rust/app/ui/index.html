@@ -17,6 +17,7 @@
   aside button.sel { background:var(--accent); color:#fff; }
   aside small { display:block; color:var(--muted); font-size:11px; }
   aside button.sel small { color:#dde8f5; }
+  aside button.foot { border-top:1px solid var(--line); color:var(--muted); }
   main { display:flex; flex-direction:column; min-width:0; }
   .bar { display:flex; gap:8px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
   .bar .grow { flex:1; }
@@ -58,7 +59,7 @@
 </style>
 </head>
 <body>
-<aside><h1>Nexus Mod Manager</h1><nav id="games"></nav></aside>
+<aside><h1>Nexus Mod Manager</h1><nav id="games"></nav><button id="appsettings" class="foot">App settings</button></aside>
 <main>
   <div class="bar">
     <strong id="title">Select a game</strong><span class="grow"></span>

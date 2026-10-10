@@ -211,10 +211,10 @@ fn parse_groups(n: Node) -> Vec<Group> {
     groups
 }
 
-pub fn parse(xml_bytes: &[u8]) -> Result<ModuleConfig, String> {
+pub fn parse(xml_bytes: &[u8]) -> crate::Result<ModuleConfig> {
     let xml = decode(xml_bytes);
     let doc = roxmltree::Document::parse_with_options(&xml, roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("fomod/ModuleConfig.xml: {e}"))?;
     let root = doc.root_element();
 
     let mut steps: Vec<Step> = match child(root, "installSteps") {
