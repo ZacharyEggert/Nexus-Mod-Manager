@@ -59,6 +59,17 @@
     }
   }
 
+  /** Index column: the game's hex slot, or (as C#'s Index column) the 1-based count of indexed plugins. */
+  let hex = $state(true);
+  try { hex = localStorage.getItem('pluginIndexHex') !== '0'; } catch {}
+  function toggleHex() {
+    hex = !hex;
+    try { localStorage.setItem('pluginIndexHex', hex ? '1' : '0'); } catch {}
+  }
+  const decimal = $derived.by(() => {
+    let n = 0;
+    return new Map(rows.filter((r) => r.index != null).map((r) => [r.name, ++n]));
+  });
   const shown = $derived(rows.filter((r) => !filter || r.name.toLowerCase().includes(filter.toLowerCase()) || r.owner?.toLowerCase().includes(filter.toLowerCase())));
   const used = (c: api.PluginRow['class']) => rows.filter((r) => r.active && r.class === c).length;
   const sel = $derived(rows.find((r) => r.name === selected));
@@ -216,7 +227,7 @@
 {#if rows.length}
   <div class="plugins">
     <table role="grid" aria-multiselectable="true" aria-label="Plugins">
-      <thead><tr><th>Index</th><th>On</th><th>Plugin</th><th>Type</th><th></th></tr></thead>
+      <thead><tr><th><button class="link" onclick={toggleHex} title="Switch between hex load-order slot and decimal count">{hex ? 'Index (hex)' : 'Index (#)'}</button></th><th>On</th><th>Plugin</th><th>Type</th><th></th></tr></thead>
       <tbody>
         {#each shown as r, i (r.name)}
           {@const errs = r.diagnostics.filter((d) => d.error)}
@@ -229,7 +240,7 @@
             ondragend={() => (dragging = null)}
             ondragover={(e) => dragging && e.preventDefault()}
             ondrop={(e) => { e.preventDefault(); if (dragging && dragging !== r.name) moveTo(dragging, r.name); dragging = null; }}>
-            <td class="num">{r.index ?? ''}</td>
+            <td class="num">{hex ? (r.index ?? '') : (decimal.get(r.name) ?? '')}</td>
             <td>
               <input type="checkbox" checked={r.active} disabled={r.locked_active} aria-label="Activate {r.name}"
                 title={r.locked_active ? 'The game always loads this plugin' : ''}
