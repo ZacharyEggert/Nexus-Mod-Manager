@@ -261,6 +261,8 @@ export interface StageResult {
   fomod: ModuleConfig | null;
   /** Archive path of an unsupported C# script installer: offer a plain install. */
   script: string | null;
+  /** OBMM Mod Script installer: run it with `scriptStep`, then `fomodInstall(token, null)`. */
+  mod_script: boolean;
   info: FomodInfo | null;
   /** Choices this mod (or the one it replaces) was last installed with: offer a replay. */
   choices: Selection | null;
@@ -327,6 +329,28 @@ export const pickArchive = () => invoke<string | null>('pick_archive');
 export const pickFolder = () => invoke<string | null>('pick_folder');
 export const fomodEval = (token: string, sel: Selection) => invoke<Eval>('fomod_eval', { token, sel });
 export const fomodImage = (token: string, path: string) => invoke<ArrayBuffer>('fomod_image', { token, path });
+/** A Mod Script `Select` option; `image` is a path for `fomodImage`. */
+export interface ScriptOption {
+  name: string;
+  description: string | null;
+  image: string | null;
+  default: boolean;
+}
+
+/** A question a Mod Script asks. */
+export type ScriptPrompt =
+  | { kind: 'select'; title: string; many: boolean; options: ScriptOption[] }
+  | { kind: 'yes_no'; title: string; message: string }
+  | { kind: 'message'; title: string | null; message: string }
+  | { kind: 'input'; title: string | null; initial: string | null }
+  | { kind: 'text'; title: string | null; text: string }
+  | { kind: 'image'; title: string | null; path: string };
+
+/** select: picked option indexes; yes_no: boolean; input: text; others (or input cancelled): null. */
+export type ScriptAnswer = number[] | boolean | string | null;
+
+/** Run a staged Mod Script with the answers so far: its next question, or null once it finished. */
+export const scriptStep = (token: string, answers: ScriptAnswer[]) => invoke<ScriptPrompt | null>('script_step', { token, answers });
 export const fomodCancel = (token: string) => invoke<void>('fomod_cancel', { token });
 /** id: a launch option; null = the game's default launch. */
 export const launch = (mode: string, id: string | null = null) => invoke<void>('launch', { mode, id });

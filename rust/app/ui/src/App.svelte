@@ -7,6 +7,7 @@
   import Library from './Library.svelte';
   import Plugins from './Plugins.svelte';
   import Setup from './Setup.svelte';
+  import ScriptDialog from './ScriptDialog.svelte';
   import Wizard from './Wizard.svelte';
 
   type View = { kind: 'none' } | { kind: 'settings' } | { kind: 'downloads' } | { kind: 'game'; mode: string; setup: boolean };
@@ -18,6 +19,7 @@
   /** Library of `cur`, loaded when its view shows. */
   let lib = $state<api.Library | null>(null);
   let wizard = $state<{ token: string; cfg: api.ModuleConfig; info: api.FomodInfo | null; saved: api.Selection | null; finish: (sel: api.Selection | null) => void } | null>(null);
+  let modScript = $state<{ token: string; name: string; finish: (ok: boolean) => void } | null>(null);
   let profile = $state('');
   let profileName = $state('');
   let launchAnyway = false;
@@ -104,6 +106,11 @@
       const sel = await new Promise<api.Selection | null>((finish) => (wizard = { token, cfg, info: res.info, saved: res.choices, finish }));
       wizard = null;
       if (sel) await runTask(label, api.fomodInstall(token, sel, upgrade)).catch(() => {});
+      else api.fomodCancel(token);
+    } else if (token && res.mod_script) {
+      const ok = await new Promise<boolean>((finish) => (modScript = { token, name: name ?? token, finish }));
+      modScript = null;
+      if (ok) await runTask(label, api.fomodInstall(token, null, upgrade)).catch(() => {});
       else api.fomodCancel(token);
     } else if (token && res.script) {
       const msg = `${name} uses a C# script installer (${res.script}), which isn’t supported.\n\nInstall its files as they are? The script’s choices and checks are skipped, so you may need to move or remove files by hand.`;
@@ -299,6 +306,9 @@
   <div id="status" class:err={ui.status.err} role="status" aria-live="polite">{ui.status.msg}</div>
 </main>
 
+{#if modScript}
+  <ScriptDialog token={modScript.token} name={modScript.name} onfinish={modScript.finish} />
+{/if}
 {#if wizard}
   <Wizard token={wizard.token} cfg={wizard.cfg} info={wizard.info} saved={wizard.saved} onfinish={wizard.finish} />
 {/if}

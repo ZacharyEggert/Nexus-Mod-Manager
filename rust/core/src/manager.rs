@@ -13,7 +13,7 @@
 use crate::adjust::{self, Dest};
 use crate::fomod::{self, ModuleConfig, Selection};
 use crate::game::{has_ext, GameDef};
-use crate::{loot, plugins};
+use crate::{loot, modscript, plugins};
 use crate::{write_durable, Error, IoContext, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -217,10 +217,22 @@ pub struct Staged {
     pub info: Option<fomod::Info>,
     /// The archive's `fomod/screenshot*`.
     pub screenshot: Option<PathBuf>,
+    /// OBMM Mod Script installer (`fomod/script[.txt]`) when there is neither a
+    /// `ModuleConfig.xml` nor a C# script; `run_mod_script` must finish it before `install`.
+    pub mod_script: Option<ModScript>,
     /// Remembered wizard choices for this mod id (or the one it replaces), mapped onto this config.
     pub choices: Option<Selection>,
     /// Installed mod this replaces in place: itself (reinstall) or an older version (upgrade).
     pub replaces: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModScript {
+    /// Folder holding `fomod/`.
+    pub base: PathBuf,
+    pub code: String,
+    /// What the script installs, once it ran to the end.
+    pub plan: Option<modscript::Plan>,
 }
 
 pub struct Manager {
@@ -480,7 +492,7 @@ fn crash_point() {
 /// in the game's `textures/` on case-sensitive volumes. Components past the first missing one
 /// keep `rel`'s casing. No-op cost on case-insensitive volumes: one stat when the path exists.
 // ponytail: read_dir per missed component, uncached; cache dir listings per deploy if it shows up in profiles.
-fn resolve_ci(base: &Path, rel: &str) -> PathBuf {
+pub(crate) fn resolve_ci(base: &Path, rel: &str) -> PathBuf {
     let exact = base.join(rel);
     if exact.exists() {
         return exact;
@@ -803,12 +815,21 @@ impl Manager {
             }
             choices = self.saved_choices(cfg, &id);
         }
+        let script = fomod
+            .is_none()
+            .then(|| fomod::locate_script(&dir))
+            .flatten();
+        let mod_script = match (&fomod, &script, modscript::locate(&dir)) {
+            (None, None, Some(p)) => Some(ModScript {
+                base: p.parent().unwrap().parent().unwrap().to_path_buf(),
+                code: crate::ini::decode(&fs::read(&p).at(&p)?),
+                plan: None,
+            }),
+            _ => None,
+        };
         Ok(Staged {
-            script: fomod
-                .is_none()
-                .then(|| fomod::locate_script(&dir))
-                .flatten()
-                .map(|p| rel(&p, &dir)),
+            script: script.map(|p| rel(&p, &dir)),
+            mod_script,
             info: fomod::locate_info(&dir).and_then(|p| fomod::parse_info(&fs::read(p).ok()?)),
             screenshot,
             choices,
@@ -824,6 +845,90 @@ impl Manager {
             fomod,
             nexus: None,
         })
+    }
+
+    /// What a Mod Script in `base` sees of the mod and this game.
+    pub fn mod_script_host(&self, base: &Path) -> modscript::Host {
+        let env = self.fomod_env();
+        let files = files_under(base)
+            .iter()
+            .map(|f| rel(f, base))
+            .filter(|r| !r.to_lowercase().starts_with("fomod"))
+            .collect();
+        let plugins = plugins::Policy::new(&self.game, &self.game_path)
+            .map(|p| p.read().into_iter().map(|p| (p.name, p.active)).collect())
+            .unwrap_or_default();
+        modscript::Host {
+            files,
+            base: base.to_path_buf(),
+            install_root: self.install_root(),
+            plugin_exts: self.game.plugin_extensions.clone(),
+            plugins,
+            game: env.game,
+            extender: env.extender,
+            game_ini: self.settings_file(None),
+            renderer: self.game.gamebryo.as_ref().map(|_| {
+                self.game
+                    .settings_path("{UserGameData}\\RendererInfo.txt", &self.game_path)
+            }),
+            gamebryo: ["Oblivion", "Morrowind"].contains(&&self.game.mode_id[..]),
+        }
+    }
+
+    /// Run the staged Mod Script with `answers` to its questions so far: the next question, or
+    /// None once it finished (its plan is then kept for `install`).
+    pub fn run_mod_script(
+        &self,
+        s: &mut Staged,
+        answers: &[modscript::Answer],
+    ) -> R<Option<modscript::Prompt>> {
+        let ms = s.mod_script.as_mut().ok_or("not a Mod Script install")?;
+        match modscript::run(&ms.code, &self.mod_script_host(&ms.base), answers)? {
+            modscript::Outcome::Ask(p) => Ok(Some(p)),
+            modscript::Outcome::Done(plan) => {
+                ms.plan = Some(plan);
+                Ok(None)
+            }
+        }
+    }
+
+    /// A Mod Script's plugin changes, after its plugins are deployed: relative load orders
+    /// (C# `SetRelativeLoadOrder`: each listed plugin found above the previous one moves just
+    /// below it), then `UncheckEsp`. Best effort: a change that breaks the load order is skipped.
+    fn apply_script_plugins(&self, plan: &modscript::Plan) {
+        if plan.uncheck.is_empty() && plan.orders.is_empty() {
+            return;
+        }
+        let Some(policy) = plugins::Policy::new(&self.game, &self.game_path) else {
+            return;
+        };
+        let mut list = policy.read();
+        let at = |list: &[plugins::Plugin], n: &str| {
+            let n = n.rsplit(['/', '\\']).next().unwrap_or(n);
+            list.iter().position(|p| p.name.eq_ignore_ascii_case(n))
+        };
+        for order in &plan.orders {
+            let mut cur = None;
+            for name in order {
+                let Some(i) = at(&list, name) else { continue };
+                cur = match cur {
+                    Some(c) if i < c => {
+                        let p = list.remove(i);
+                        list.insert(c, p);
+                        Some(c)
+                    }
+                    _ => Some(i),
+                };
+            }
+        }
+        for n in &plan.uncheck {
+            if let Some(i) = at(&list, n) {
+                list[i].active = false;
+            }
+        }
+        if let Err(e) = self.set_plugins(&list) {
+            tracing::warn!("Mod Script plugin changes not applied: {e}");
+        }
     }
 
     fn saved_choices(&self, cfg: &ModuleConfig, id: &str) -> Option<Selection> {
@@ -916,7 +1021,31 @@ impl Manager {
         let mut put =
             |src: PathBuf, dest: String, game_root: bool| raw.push((src, dest, game_root));
         let mut game_root = false;
+        let script_plan = match &staged.mod_script {
+            Some(ms) => Some(
+                ms.plan
+                    .clone()
+                    .ok_or("the Mod Script hasn't run to the end")?,
+            ),
+            None => None,
+        };
         match (&staged.fomod, sel) {
+            (None, _) if script_plan.is_some() => {
+                let ms = staged.mod_script.as_ref().unwrap();
+                let out = staged.dir.join(".modscript");
+                for (i, (dest, src)) in script_plan.as_ref().unwrap().files.values().enumerate() {
+                    let from = match src {
+                        modscript::Src::Mod(p) => ms.base.join(p),
+                        modscript::Src::Bytes(b) => {
+                            let f = out.join(i.to_string());
+                            fs::create_dir_all(&out).at(&out)?;
+                            fs::write(&f, b).at(&f)?;
+                            f
+                        }
+                    };
+                    put(from, dest.clone(), false);
+                }
+            }
             (Some((base, cfg)), Some(sel)) => {
                 // Case-insensitive index of the archive: FOMod paths rarely match on-disk case.
                 let index: HashMap<String, PathBuf> = walkdir::WalkDir::new(base)
@@ -1070,9 +1199,20 @@ impl Manager {
             info: staged.info,
             screenshot,
         };
+        // C# `IniInstaller`: the script's INI edits, undone when the mod goes.
+        let entry_id = entry.id.clone();
+        let record_ini = |m: &mut Self| {
+            for (file, section, key, value) in script_plan.iter().flat_map(|p| &p.ini) {
+                m.edit_ini(&entry_id, file, section, key, value);
+            }
+        };
         let (Some(i), Some(prev)) = (slot, prev) else {
             self.state.mods.push(entry);
+            record_ini(self);
             self.deploy()?;
+            if let Some(p) = &script_plan {
+                self.apply_script_plugins(p);
+            }
             return self.resolve_pending();
         };
         for ids in self.state.profiles.values_mut() {
@@ -1101,11 +1241,15 @@ impl Manager {
             }
         }
         // C# `IniUpgradeInstaller.FinalizeInstall` undoes the old version's INI edits the new one
-        // doesn't make again; installers make none (script installers aren't supported).
+        // doesn't make again.
         for e in &mut self.state.ini_edits {
             e.by.retain(|(id, _)| *id != prev.id);
         }
+        record_ini(self);
         self.finish(&HashSet::new())?;
+        if let Some(p) = &script_plan {
+            self.apply_script_plugins(p);
+        }
         self.resolve_pending()
     }
 
@@ -2196,6 +2340,90 @@ mod tests {
         );
         let s = m.stage(&b).unwrap();
         assert!(s.fomod.is_some() && s.script.is_none());
+    }
+
+    #[test]
+    fn mod_script_runs_then_installs_its_plan() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        fs::write(game_path.join("Data/Oblivion.esm"), "").unwrap();
+        let user = t.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+        let ini = user.join("Oblivion.ini");
+        fs::write(&ini, "[Archive]\nSArchiveList=Base.bsa\n").unwrap();
+        let txt = t
+            .path()
+            .join("appdata/plugins.txt")
+            .to_string_lossy()
+            .into_owned();
+        let mut game = crate::game::find("Oblivion").unwrap();
+        let gb = game.gamebryo.as_mut().unwrap();
+        gb.user_game_data_path = Some(user.to_string_lossy().into());
+        gb.plugins_file_path = Some(txt.clone());
+        if let Some(p) = game.plugin.as_mut().and_then(|p| p.policy.as_mut()) {
+            p.plugins_file_path = Some(txt);
+        }
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
+
+        let script = r#"DontInstallAnyDataFiles
+If DialogYesNo "Extras?"
+    CopyDataFile opt\x.txt extras\x.txt
+EndIf
+SetTextLine cfg.txt 0 "A"
+EditINI General bTest 1
+RegisterBSA Mine.bsa
+UncheckEsp B.esp"#;
+        let a = t.path().join("Scripted.zip");
+        zip(
+            &a,
+            &[
+                ("Wrap/fomod/script.txt", script),
+                ("Wrap/A.esp", ""),
+                ("Wrap/B.esp", ""),
+                ("Wrap/opt/x.txt", "x"),
+                ("Wrap/cfg.txt", "a\r\nb\r\n"),
+            ],
+        );
+        let mut s = m.stage(&a).unwrap();
+        assert!(s.fomod.is_none() && s.script.is_none());
+        assert!(matches!(
+            m.run_mod_script(&mut s, &[]).unwrap(),
+            Some(modscript::Prompt::YesNo { .. })
+        ));
+        assert!(m.install(s.clone(), None).is_err()); // not run to the end yet
+        let answers = [modscript::Answer::Bool(true)];
+        assert_eq!(m.run_mod_script(&mut s, &answers).unwrap(), None);
+        m.install(s, None).unwrap();
+
+        let data = game_path.join("Data");
+        assert_eq!(fs::read_to_string(data.join("extras/x.txt")).unwrap(), "x");
+        assert_eq!(
+            fs::read_to_string(data.join("cfg.txt")).unwrap(),
+            "A\r\nb\r\n"
+        );
+        assert!(!data.join("opt").exists() && !data.join("fomod").exists());
+        assert_eq!(ini::get(&ini, "General", "bTest").as_deref(), Some("1"));
+        assert_eq!(
+            ini::get(&ini, "Archive", "SArchiveList").as_deref(),
+            Some("Base.bsa, Mine.bsa")
+        );
+        let active: Vec<(String, bool)> = m
+            .plugins()
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.entry.name, r.entry.active))
+            .collect();
+        assert!(active.contains(&("A.esp".into(), true)));
+        assert!(active.contains(&("B.esp".into(), false)));
+
+        // Removing the mod undoes its INI edits.
+        m.remove("Scripted").unwrap();
+        assert_eq!(ini::get(&ini, "General", "bTest"), None);
+        assert_eq!(
+            ini::get(&ini, "Archive", "SArchiveList").as_deref(),
+            Some("Base.bsa")
+        );
     }
 
     #[test]

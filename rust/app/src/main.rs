@@ -5,6 +5,7 @@ use nmm_core::fomod::{Eval, Info, ModuleConfig, Selection};
 use nmm_core::invalidation::ArchiveInvalidation;
 use nmm_core::launch as launcher;
 use nmm_core::manager::{ImportReport, LinkMode, Manager, ModEntry, PluginRow, Staged};
+use nmm_core::modscript::{Answer, Prompt};
 use nmm_core::nexus::{self, sso, User};
 use nmm_core::plugins::Plugin;
 use nmm_core::{discover, game, IoContext, Task};
@@ -966,6 +967,8 @@ struct StageResult {
     fomod: Option<ModuleConfig>,
     /// Unsupported C# script installer: the UI offers a plain install (`fomod_install` without `sel`).
     script: Option<String>,
+    /// OBMM Mod Script installer: run it with `script_step`, then `fomod_install` without `sel`.
+    mod_script: bool,
     /// `fomod/info.xml` metadata, for the wizard header.
     info: Option<Info>,
     /// Choices this mod (or the one it replaces) was last installed with, to replay.
@@ -1007,12 +1010,14 @@ fn stage(
             .cloned();
         let (fomod, script) = (staged.fomod.clone().map(|f| f.1), staged.script.clone());
         let (info, choices) = (staged.info.clone(), staged.choices.clone());
-        if fomod.is_none() && script.is_none() && replaces.is_none() {
+        let mod_script = staged.mod_script.is_some();
+        if fomod.is_none() && script.is_none() && !mod_script && replaces.is_none() {
             m.transact(|m| m.install(staged, None))?;
             return Ok(StageResult {
                 token: None,
                 fomod,
                 script,
+                mod_script,
                 info,
                 choices,
                 replaces,
@@ -1029,6 +1034,7 @@ fn stage(
             token: Some(token),
             fomod,
             script,
+            mod_script,
             info,
             choices,
             replaces,
@@ -1056,7 +1062,11 @@ async fn fomod_eval(app: AppHandle, st: State<'_, App>, token: String, sel: Sele
 #[tauri::command]
 async fn fomod_image(st: State<'_, App>, token: String, path: String) -> R<tauri::ipc::Response> {
     let (_, s) = staged(&st, &token)?;
-    let base = s.fomod.unwrap().0;
+    let base = match (s.fomod, s.mod_script) {
+        (Some((base, _)), _) => base,
+        (_, Some(ms)) => ms.base,
+        _ => return Err("no installer images".into()),
+    };
     // Resolve case-insensitively and refuse anything outside the extracted archive.
     let want = path.replace('\\', "/").to_lowercase();
     let hit = walkdir::WalkDir::new(&base)
@@ -1073,8 +1083,24 @@ async fn fomod_image(st: State<'_, App>, token: String, path: String) -> R<tauri
     ))
 }
 
+/// Run a staged Mod Script with the answers so far: its next question, or null once it ran to the
+/// end (`fomod_install` without `sel` then installs what it chose).
+#[tauri::command]
+async fn script_step(app: AppHandle, token: String, answers: Vec<Answer>) -> R<Option<Prompt>> {
+    blocking(move || {
+        let st = app.state::<App>();
+        let (mode, mut s) = staged(&st, &token)?;
+        let next = read(&app, &mode)?.run_mod_script(&mut s, &answers)?;
+        if let Some(e) = st.staged.lock().unwrap().get_mut(&token) {
+            e.1 = s;
+        }
+        Ok(next)
+    })
+    .await
+}
+
 /// Task: install a staged FOMod with the wizard's selection; no selection = plain install of a
-/// staged C# script mod or plain mod. `replace` false installs alongside the mod it would replace.
+/// staged C# script mod, finished Mod Script or plain mod. `replace` false installs alongside the mod it would replace.
 #[tauri::command]
 fn fomod_install(
     app: AppHandle,
@@ -1557,6 +1583,7 @@ fn main() {
             fomod_image,
             fomod_install,
             fomod_cancel,
+            script_step,
             apply,
             repair,
             adopt,
