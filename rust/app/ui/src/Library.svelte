@@ -17,13 +17,20 @@
   }
 
   const base = (path: string) => path.slice(path.lastIndexOf('/') + 1);
-  let readme = $state<{ title: string; text: string } | null>(null);
+  let readme = $state<{ title: string; text?: string; image?: string } | null>(null);
   let dlg: HTMLDialogElement;
 
   async function showReadme(m: api.ModEntry, path: string) {
     const text = await run(`Opening ${base(path)}`, () => api.readme(mode, m.id, path)).catch(() => null);
     if (text === null) return;
     readme = { title: `${m.name} — ${base(path)}`, text };
+    dlg.showModal();
+  }
+
+  async function showScreenshot(m: api.ModEntry) {
+    const bytes = await run('Opening screenshot', () => api.screenshot(mode, m.id)).catch(() => null);
+    if (bytes === null) return;
+    readme = { title: `${m.name} — screenshot`, image: URL.createObjectURL(new Blob([bytes])) };
     dlg.showModal();
   }
 
@@ -99,6 +106,11 @@
                   Update available: {n.update.name} {n.update.version}
                 </button>
               {/if}
+            {:else if m.info && (m.info.version || m.info.author)}
+              <div class="muted" title={m.info.id && `Nexus mod ${m.info.id}`}>{[m.info.version && `v${m.info.version}`, m.info.author].filter(Boolean).join(' · ')}</div>
+            {/if}
+            {#if m.screenshot}
+              <div class="muted"><button class="link" onclick={() => showScreenshot(m)}>Screenshot</button></div>
             {/if}
             {#if m.readmes?.length}
               <div class="muted">Readme:
@@ -130,11 +142,11 @@
 {:else}
   <p>No mods installed yet.</p>
 {/if}
-<dialog bind:this={dlg} onclose={() => (readme = null)}>
+<dialog bind:this={dlg} onclose={() => { if (readme?.image) URL.revokeObjectURL(readme.image); readme = null; }}>
   {#if readme}
     <div class="readme">
       <header>{readme.title}</header>
-      <pre>{readme.text}</pre>
+      {#if readme.image}<img src={readme.image} alt="{readme.title}" />{:else}<pre>{readme.text}</pre>{/if}
       <footer><button class="btn" onclick={() => dlg.close()}>Close</button></footer>
     </div>
   {/if}

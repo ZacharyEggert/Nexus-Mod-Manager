@@ -195,7 +195,7 @@ pub fn ext_master(name: &str) -> bool {
     l.ends_with(".esm") || l.ends_with(".esl")
 }
 
-fn is_plugin_name(name: &str) -> bool {
+pub(crate) fn is_plugin_name(name: &str) -> bool {
     let l = name.to_ascii_lowercase();
     l.len() > 4 && EXTENSIONS.iter().any(|e| l.ends_with(e))
 }

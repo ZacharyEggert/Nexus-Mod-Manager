@@ -51,6 +51,18 @@ export interface ModEntry {
   nexus?: NexusMeta;
   /** Archive-relative readme paths kept on install; omitted when none. */
   readmes?: string[];
+  /** fomod/info.xml metadata; omitted when none. */
+  info?: FomodInfo;
+  /** File name of the kept fomod/screenshot*; omitted when none. */
+  screenshot?: string;
+}
+
+export interface FomodInfo {
+  name: string;
+  author: string;
+  version: string;
+  /** Nexus mod id. */
+  id: string;
 }
 
 export interface NexusMeta {
@@ -229,6 +241,8 @@ export interface FomodGroup {
 
 export interface ModuleConfig {
   name: string;
+  /** Header image (or the archive's screenshot), for `fomodImage`. */
+  image: string | null;
   steps: { name: string; groups: FomodGroup[] }[];
 }
 
@@ -247,6 +261,9 @@ export interface StageResult {
   fomod: ModuleConfig | null;
   /** Archive path of an unsupported C# script installer: offer a plain install. */
   script: string | null;
+  info: FomodInfo | null;
+  /** Choices this mod was last installed with: offer a replay. */
+  choices: Selection | null;
 }
 
 export type Op =
@@ -284,6 +301,8 @@ export const confirmRemove = (mode: string, id: string) => invoke<boolean>('conf
 export const library = (mode: string) => invoke<Library>('library', { mode });
 /** Text of a .txt readme; other formats open in the system app and give null. */
 export const readme = (mode: string, id: string, name: string) => invoke<string | null>('readme', { mode, id, name });
+/** The mod's kept fomod screenshot. */
+export const screenshot = (mode: string, id: string) => invoke<ArrayBuffer>('screenshot', { mode, id });
 export const plugins = (mode: string) => invoke<PluginRow[]>('plugins', { mode });
 /** Refused with the reasons when the change would break the load order. */
 export const pluginsSet = (mode: string, plugins: Plugin[]) => invoke<PluginRow[]>('plugins_set', { mode, plugins });

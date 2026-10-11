@@ -49,6 +49,12 @@ pub struct ModEntry {
     /// `ReadMe/<id>/`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readmes: Vec<String>,
+    /// `fomod/info.xml` metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info: Option<fomod::Info>,
+    /// File name of the archive's `fomod/screenshot*`, stored under `Screenshot/<id>/`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<String>,
 }
 
 impl ModEntry {
@@ -124,6 +130,10 @@ pub struct State {
     /// INI keys mods edited, with who set what (C# install-log INI edits + `IniEdits.xml`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ini_edits: Vec<crate::ini::Edit>,
+    /// Mod id -> FOMod wizard choices it was last installed with; kept after uninstall so a
+    /// reinstall (or upgrade) can replay them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fomod_choices: BTreeMap<String, Vec<fomod::Choice>>,
     /// Unix seconds of the last Nexus update check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nexus_checked: Option<u64>,
@@ -203,6 +213,12 @@ pub struct Staged {
     pub script: Option<String>,
     /// Nexus origin to record on the installed mod.
     pub nexus: Option<crate::nexus::updates::NexusMeta>,
+    /// `fomod/info.xml` metadata.
+    pub info: Option<fomod::Info>,
+    /// The archive's `fomod/screenshot*`.
+    pub screenshot: Option<PathBuf>,
+    /// Remembered wizard choices for this mod id, mapped onto this config.
+    pub choices: Option<Selection>,
 }
 
 pub struct Manager {
@@ -571,6 +587,7 @@ impl Manager {
                     self.virtual_dir(&id),
                     self.mods_dir.join("GameRootInstall").join(&id),
                     self.readme_dir(&id),
+                    self.screenshot_dir(&id),
                 ] {
                     match fs::remove_dir_all(&dir) {
                         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -630,6 +647,18 @@ impl Manager {
             .collect()
     }
 
+    /// Copy the archive's screenshot to `Screenshot/<id>/`; a failure only loses the screenshot.
+    fn keep_screenshot(&self, staged: &Staged) -> Option<String> {
+        let src = staged.screenshot.as_ref()?;
+        let name = src.file_name()?.to_string_lossy().into_owned();
+        let dir = self.screenshot_dir(&staged.id);
+        fs::create_dir_all(&dir)
+            .and_then(|()| fs::copy(src, dir.join(&name)))
+            .inspect_err(|e| tracing::warn!(id = staged.id, "keeping screenshot failed: {e}"))
+            .ok()?;
+        Some(name)
+    }
+
     /// Where mod `id`'s readme `name` (one of its `readmes`) is stored.
     pub fn readme_path(&self, id: &str, name: &str) -> Option<PathBuf> {
         let m = self.state.mods.iter().find(|m| m.id == id)?;
@@ -637,6 +666,16 @@ impl Manager {
             .iter()
             .any(|r| r == name)
             .then(|| self.readme_dir(id).join(name))
+    }
+
+    fn screenshot_dir(&self, id: &str) -> PathBuf {
+        self.mods_dir.join("Screenshot").join(id)
+    }
+
+    /// Where mod `id`'s kept screenshot is.
+    pub fn screenshot_path(&self, id: &str) -> Option<PathBuf> {
+        let m = self.state.mods.iter().find(|m| m.id == id)?;
+        Some(self.screenshot_dir(id).join(m.screenshot.as_ref()?))
     }
 
     pub fn install_root(&self) -> PathBuf {
@@ -670,15 +709,44 @@ impl Manager {
         }
     }
 
-    /// fileDependency state for FOMod conditions.
-    pub fn file_state(&self, name: &str) -> String {
-        // ponytail: no Inactive state; a present file counts as Active.
-        if resolve_ci(&self.install_root(), &name.replace('\\', "/")).exists() {
-            "Active"
-        } else {
-            "Missing"
+    /// What FOMod conditions check: plugin states, game and script extender versions.
+    pub fn fomod_env(&self) -> fomod::Env {
+        let plugins = plugins::Policy::new(&self.game, &self.game_path).map(|p| p.read());
+        let root = self.install_root();
+        let version = |exes: &[String]| {
+            exes.iter().find_map(|e| {
+                fomod::exe_version(&resolve_ci(&self.game_path, &e.replace('\\', "/")))
+            })
+        };
+        let extenders = self
+            .game
+            .gamebryo
+            .as_ref()
+            .map(|g| &g.script_extender_executables[..]);
+        fomod::Env {
+            file_state: Box::new(move |name| {
+                let name = name.replace('\\', "/");
+                // C# `PluginCondition`: a plugin is Active / Inactive per the load order, Missing
+                // when not on disk.
+                if let Some(list) = plugins.as_ref().filter(|_| plugins::is_plugin_name(&name)) {
+                    return match list.iter().find(|p| p.name.eq_ignore_ascii_case(&name)) {
+                        Some(p) if p.active => "Active",
+                        Some(_) => "Inactive",
+                        None => "Missing",
+                    }
+                    .into();
+                }
+                // Other files (and games without plugins): present counts as Active.
+                if resolve_ci(&root, &name).exists() {
+                    "Active"
+                } else {
+                    "Missing"
+                }
+                .into()
+            }),
+            game: version(&self.game.game_executables),
+            extender: extenders.and_then(version),
         }
-        .into()
     }
 
     // ---------- install ----------
@@ -713,30 +781,57 @@ impl Manager {
                 None => Ok(None),
             }
         });
-        match fomod {
-            Ok(fomod) => Ok(Staged {
-                script: fomod
-                    .is_none()
-                    .then(|| fomod::locate_script(&dir))
-                    .flatten()
-                    .map(|p| rel(&p, &dir)),
-                id,
-                archive: archive.to_path_buf(),
-                dir,
-                fomod,
-                nexus: None,
-            }),
+        let mut fomod = match fomod {
+            Ok(f) => f,
             Err(e) => {
                 let _ = fs::remove_dir_all(&dir);
-                Err(e)
+                return Err(e);
             }
+        };
+        let screenshot = fomod::locate_screenshot(&dir);
+        let mut choices = None;
+        if let Some((base, cfg)) = &mut fomod {
+            if let Some(why) = cfg.unmet(&self.fomod_env()) {
+                let _ = fs::remove_dir_all(&dir);
+                return Err(why.into());
+            }
+            // C# shows the screenshot when the config names no header image.
+            if cfg.image.is_none() {
+                cfg.image = screenshot
+                    .as_ref()
+                    .filter(|s| s.starts_with(&*base))
+                    .map(|s| rel(s, base));
+            }
+            choices = self
+                .state
+                .fomod_choices
+                .get(&id)
+                .map(|c| cfg.selection(c))
+                .filter(|s| !s.is_empty());
         }
+        Ok(Staged {
+            script: fomod
+                .is_none()
+                .then(|| fomod::locate_script(&dir))
+                .flatten()
+                .map(|p| rel(&p, &dir)),
+            info: fomod::locate_info(&dir).and_then(|p| fomod::parse_info(&fs::read(p).ok()?)),
+            screenshot,
+            choices,
+            id,
+            archive: archive.to_path_buf(),
+            dir,
+            fomod,
+            nexus: None,
+        })
     }
 
     /// Install a staged archive. `sel` is required when the archive is a FOMod.
     pub fn install(&mut self, staged: Staged, sel: Option<&Selection>) -> R<()> {
-        let name = match (&staged.fomod, sel) {
-            (Some((_, cfg)), Some(_)) if !cfg.name.is_empty() => cfg.name.clone(),
+        // C# names the mod from info.xml.
+        let name = match (&staged.info, &staged.fomod, sel) {
+            (Some(i), _, _) if !i.name.is_empty() => i.name.clone(),
+            (_, Some((_, cfg)), Some(_)) if !cfg.name.is_empty() => cfg.name.clone(),
             _ => staged.id.clone(),
         };
         let profile = self.game.mod_install.path_adjustment_profile;
@@ -766,7 +861,7 @@ impl Manager {
                     .filter_map(Result::ok)
                     .map(|e| (rel(e.path(), base).to_lowercase(), e.into_path()))
                     .collect();
-                for f in cfg.files(sel, &|n| self.file_state(n)) {
+                for f in cfg.files(sel, &self.fomod_env()) {
                     let key = f.source.trim_matches('/').to_lowercase();
                     let src = index
                         .get(&key)
@@ -875,9 +970,9 @@ impl Manager {
                 .push(dest);
                 Ok::<_, Error>(())
             });
-        let readmes = match copied {
-            Ok(()) => self.keep_readmes(&staged),
-            Err(_) => vec![],
+        let (readmes, screenshot) = match copied {
+            Ok(()) => (self.keep_readmes(&staged), self.keep_screenshot(&staged)),
+            Err(_) => (vec![], None),
         };
         let _ = fs::remove_dir_all(&staged.dir);
         if let Err(e) = copied {
@@ -885,6 +980,10 @@ impl Manager {
                 tracing::warn!("cleanup after failed install failed: {e}");
             }
             return Err(e);
+        }
+        if let (Some((_, cfg)), Some(sel)) = (&staged.fomod, sel) {
+            let choices = cfg.choices(sel);
+            self.state.fomod_choices.insert(staged.id.clone(), choices);
         }
         self.state.mods.push(ModEntry {
             id: staged.id,
@@ -897,6 +996,8 @@ impl Manager {
             nexus: staged.nexus,
             special,
             readmes,
+            info: staged.info,
+            screenshot,
         });
         self.deploy()?;
         self.resolve_pending()
@@ -1499,6 +1600,8 @@ impl Manager {
                 nexus: None,
                 special: BTreeMap::new(),
                 readmes: list(self.readme_dir(id)),
+                info: None,
+                screenshot: list(self.screenshot_dir(id)).into_iter().next(),
             });
         }
         let report = self.scan()?;
@@ -1974,6 +2077,88 @@ mod tests {
         );
         let s = m.stage(&b).unwrap();
         assert!(s.fomod.is_some() && s.script.is_none());
+    }
+
+    #[test]
+    fn fomod_metadata_screenshot_choices_and_plugin_states() {
+        use crate::plugins::tests::tes4;
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(&data).unwrap();
+        fs::write(game_path.join("SkyrimSE.exe"), "not a PE").unwrap();
+        let txt = t.path().join("plugins.txt");
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let mods = t.path().join("mods");
+        let mut m = Manager::open(game, game_path, mods.clone()).unwrap();
+        fs::write(data.join("On.esp"), tes4(0, &[], "")).unwrap();
+        fs::write(data.join("Off.esp"), tes4(0, &[], "")).unwrap();
+        fs::write(data.join("loose.txt"), "x").unwrap();
+        fs::write(&txt, "*On.esp\nOff.esp\n").unwrap();
+        let state = m.fomod_env().file_state;
+        assert_eq!(state("On.esp"), "Active");
+        assert_eq!(state("off.ESP"), "Inactive");
+        assert_eq!(state("Gone.esp"), "Missing");
+        assert_eq!(state("loose.txt"), "Active");
+        // The executable isn't a PE file: version unknown, so a game version check fails.
+        assert_eq!(m.fomod_env().game, None);
+
+        let cfg = r#"<config><moduleName>Opt</moduleName><installSteps><installStep name="S">
+  <optionalFileGroups><group name="G" type="SelectAny"><plugins order="Explicit">
+    <plugin name="A"><description/><files><file source="a.txt"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+    <plugin name="B"><description/><files><file source="b.txt"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+  </plugins></group></optionalFileGroups></installStep></installSteps></config>"#;
+        let a = t.path().join("Opt.zip");
+        zip(
+            &a,
+            &[
+                ("fomod/ModuleConfig.xml", cfg),
+                ("fomod/info.xml", "<fomod><Name>Optional Things</Name><Author>Me</Author><Version>2.0</Version><Id>42</Id></fomod>"),
+                ("fomod/screenshot.png", "png"),
+                ("a.txt", "a"),
+                ("b.txt", "b"),
+            ],
+        );
+        let s = m.stage(&a).unwrap();
+        assert_eq!(
+            s.fomod.as_ref().unwrap().1.image.as_deref(),
+            Some("fomod/screenshot.png")
+        );
+        assert_eq!(s.choices, None);
+        m.install(s, Some(&vec![(0, 0, 1)])).unwrap();
+        let e = &m.state.mods[0];
+        assert_eq!(e.name, "Optional Things");
+        let info = e.info.as_ref().unwrap();
+        assert_eq!(
+            (&info.author[..], &info.version[..], &info.id[..]),
+            ("Me", "2.0", "42")
+        );
+        let shot = m.screenshot_path("Opt").unwrap();
+        assert_eq!(fs::read_to_string(&shot).unwrap(), "png");
+
+        // Uninstall keeps the choices; reinstalling offers them back.
+        m.remove("Opt").unwrap();
+        assert!(!shot.exists());
+        let s = m.stage(&a).unwrap();
+        assert_eq!(s.choices, Some(vec![(0, 0, 1)]));
+        m.install(s.clone(), s.choices.as_ref()).unwrap();
+        assert_eq!(m.state.mods[0].files, ["b.txt"]);
+
+        // Unmet moduleDependencies refuse the install up front.
+        let b = t.path().join("Needs.zip");
+        zip(
+            &b,
+            &[(
+                "fomod/ModuleConfig.xml",
+                r#"<config><moduleName>N</moduleName><moduleDependencies operator="And">
+                     <fileDependency file="Off.esp" state="Active"/></moduleDependencies></config>"#,
+            )],
+        );
+        let err = m.stage(&b).unwrap_err().to_string();
+        assert_eq!(err, "File 'Off.esp' is not Active.");
+        assert!(!mods.join(".staging/Needs").exists());
     }
 
     #[test]
@@ -3307,7 +3492,7 @@ mod tests {
             fs::read_to_string(data.join("Skyrim.esm")).unwrap(),
             "patched"
         );
-        assert_eq!(m.file_state("SKYRIM.ESM"), "Active");
+        assert_eq!((m.fomod_env().file_state)("SKYRIM.ESM"), "Active");
 
         // A second mod with yet another casing joins the same tree.
         let z = t.path().join("ModB.zip");

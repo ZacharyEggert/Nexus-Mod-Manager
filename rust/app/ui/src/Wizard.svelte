@@ -1,10 +1,17 @@
 <script lang="ts">
   // FOMod installer wizard. Calls `onfinish` with the selection, or null when cancelled.
+  // `saved`: the choices this mod was last installed with; they replace the defaults.
   import { onMount } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import * as api from './lib/api';
 
-  let { token, cfg, onfinish }: { token: string; cfg: api.ModuleConfig; onfinish: (sel: api.Selection | null) => void } = $props();
+  let {
+    token,
+    cfg,
+    info,
+    saved,
+    onfinish,
+  }: { token: string; cfg: api.ModuleConfig; info: api.FomodInfo | null; saved: api.Selection | null; onfinish: (sel: api.Selection | null) => void } = $props();
 
   let dlg: HTMLDialogElement;
   const sel = new SvelteSet<string>();
@@ -23,10 +30,11 @@
   };
 
   function initDefaults(e: api.Eval, si: number) {
+    saved?.filter(([s]) => s === si).forEach(([s, g, p]) => sel.add(key(s, g, p)));
     cfg.steps[si].groups.forEach((g, gi) => {
       const types = e.types[si][gi];
       g.plugins.forEach((_, pi) => {
-        if (g.kind === 'SelectAll' || types[pi] === 'Required' || types[pi] === 'Recommended') sel.add(key(si, gi, pi));
+        if (g.kind === 'SelectAll' || types[pi] === 'Required' || (!saved && types[pi] === 'Recommended')) sel.add(key(si, gi, pi));
       });
       const chosen = g.plugins.filter((_, pi) => sel.has(key(si, gi, pi))).length;
       if (g.kind === 'SelectExactlyOne' && chosen === 0) {
@@ -64,15 +72,19 @@
     refresh();
   }
 
-  async function show(p: api.FomodPlugin) {
-    shown = p;
-    if (p.image && !(p.image in images)) {
+  async function load(path: string | null) {
+    if (path && !(path in images)) {
       try {
-        images[p.image] = URL.createObjectURL(new Blob([await api.fomodImage(token, p.image)]));
+        images[path] = URL.createObjectURL(new Blob([await api.fomodImage(token, path)]));
       } catch {
-        images[p.image] = ''; // image is optional
+        images[path] = ''; // image is optional
       }
     }
+  }
+
+  function show(p: api.FomodPlugin) {
+    shown = p;
+    load(p.image);
   }
 
   const problems = $derived(
@@ -96,7 +108,10 @@
     onfinish(s);
   }
 
+  const byline = $derived([info?.author && `by ${info.author}`, info?.version && `v${info.version}`].filter(Boolean).join(' · '));
+
   onMount(async () => {
+    load(cfg.image);
     await refresh();
     dlg.showModal();
   });
@@ -106,7 +121,10 @@
   {#if ev}
     {@const s = cfg.steps[step]}
     <div class="wiz">
-      <header>{cfg.name || 'Installer'}{s ? ' — ' + s.name : ''}</header>
+      <header>
+        {info?.name || cfg.name || 'Installer'}{s ? ' — ' + s.name : ''}
+        {#if byline}<span class="muted"> {byline}</span>{/if}
+      </header>
       <div class="opts">
         {#if s}
           {#each s.groups as g, gi}
@@ -139,11 +157,15 @@
           {#if shown.image && images[shown.image]}<img src={images[shown.image]} alt="" />{/if}
           <div>{shown.description || shown.name}</div>
         {:else}
-          Hover an option for details.
+          {#if cfg.image && images[cfg.image]}<img src={images[cfg.image]} alt="" />{/if}
+          <div>Hover an option for details.</div>
         {/if}
       </div>
       <footer>
         <button class="btn" onclick={() => finish(null)}>Cancel</button>
+        {#if saved}
+          <button class="btn" title="Install with the options chosen last time, skipping the remaining steps" onclick={() => finish(saved)}>Use previous choices</button>
+        {/if}
         <button class="btn" disabled={back < 0} onclick={() => go(back)}>Back</button>
         {#if fwd >= 0}
           <button class="btn primary" disabled={problems.length > 0} onclick={() => go(fwd)}>Next</button>

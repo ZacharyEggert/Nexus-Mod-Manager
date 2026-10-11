@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use nmm_core::download::{self, Download, Downloads};
-use nmm_core::fomod::{Eval, ModuleConfig, Selection};
+use nmm_core::fomod::{Eval, Info, ModuleConfig, Selection};
 use nmm_core::invalidation::ArchiveInvalidation;
 use nmm_core::launch as launcher;
 use nmm_core::manager::{ImportReport, LinkMode, Manager, ModEntry, PluginRow, Staged};
@@ -934,6 +934,15 @@ async fn readme(app: AppHandle, mode: String, id: String, name: String) -> R<Opt
     Ok(None)
 }
 
+/// A mod's kept `fomod/screenshot*` image.
+#[tauri::command]
+async fn screenshot(app: AppHandle, mode: String, id: String) -> R<tauri::ipc::Response> {
+    let path = read(&app, &mode)?
+        .screenshot_path(&id)
+        .ok_or("no screenshot")?;
+    Ok(tauri::ipc::Response::new(std::fs::read(&path).at(&path)?))
+}
+
 #[tauri::command]
 async fn pick_archive(app: AppHandle) -> Option<String> {
     app.dialog()
@@ -957,6 +966,10 @@ struct StageResult {
     fomod: Option<ModuleConfig>,
     /// Unsupported C# script installer: the UI offers a plain install (`fomod_install` without `sel`).
     script: Option<String>,
+    /// `fomod/info.xml` metadata, for the wizard header.
+    info: Option<Info>,
+    /// Choices this mod was last installed with, to replay.
+    choices: Option<Selection>,
 }
 
 /// Task: extract an archive; plain mods install right away, FOMods return their config for the
@@ -972,12 +985,15 @@ fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: O
             .and_then(|id| downloads_of(app).ok()?.get(&id))
             .map(|d| download_meta(app, &d));
         let (fomod, script) = (staged.fomod.clone().map(|f| f.1), staged.script.clone());
+        let (info, choices) = (staged.info.clone(), staged.choices.clone());
         if fomod.is_none() && script.is_none() {
             m.transact(|m| m.install(staged, None))?;
             return Ok(StageResult {
                 token: None,
                 fomod,
                 script,
+                info,
+                choices,
             });
         }
         let token = staged.id.clone();
@@ -990,6 +1006,8 @@ fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: O
             token: Some(token),
             fomod,
             script,
+            info,
+            choices,
         })
     });
 }
@@ -1007,7 +1025,7 @@ fn staged(st: &State<'_, App>, token: &str) -> R<(String, Staged)> {
 async fn fomod_eval(app: AppHandle, st: State<'_, App>, token: String, sel: Selection) -> R<Eval> {
     let (mode, s) = staged(&st, &token)?;
     let m = read(&app, &mode)?;
-    Ok(s.fomod.unwrap().1.evaluate(&sel, &|n| m.file_state(n)))
+    Ok(s.fomod.unwrap().1.evaluate(&sel, &m.fomod_env()))
 }
 
 #[tauri::command]
@@ -1499,7 +1517,8 @@ fn main() {
             download_remove,
             nexus_check,
             open_nexus,
-            readme
+            readme,
+            screenshot
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -17,7 +17,7 @@
   const cur = $derived(games.find((g) => g.mode_id === curMode));
   /** Library of `cur`, loaded when its view shows. */
   let lib = $state<api.Library | null>(null);
-  let wizard = $state<{ token: string; cfg: api.ModuleConfig; finish: (sel: api.Selection | null) => void } | null>(null);
+  let wizard = $state<{ token: string; cfg: api.ModuleConfig; info: api.FomodInfo | null; saved: api.Selection | null; finish: (sel: api.Selection | null) => void } | null>(null);
   let profile = $state('');
   let profileName = $state('');
   let launchAnyway = false;
@@ -77,7 +77,7 @@
     const res = await runTask(`Installing ${path.split(/[\\/]/).pop()}`, api.stage(mode, path, download)).catch(() => null);
     if (res?.token && res.fomod) {
       const { token, fomod: cfg } = res;
-      const sel = await new Promise<api.Selection | null>((finish) => (wizard = { token, cfg, finish }));
+      const sel = await new Promise<api.Selection | null>((finish) => (wizard = { token, cfg, info: res.info, saved: res.choices, finish }));
       wizard = null;
       if (sel) await runTask(`Installing ${cfg.name || 'mod'}`, api.fomodInstall(token, sel)).catch(() => {});
       else api.fomodCancel(token);
@@ -273,5 +273,5 @@
 </main>
 
 {#if wizard}
-  <Wizard token={wizard.token} cfg={wizard.cfg} onfinish={wizard.finish} />
+  <Wizard token={wizard.token} cfg={wizard.cfg} info={wizard.info} saved={wizard.saved} onfinish={wizard.finish} />
 {/if}
