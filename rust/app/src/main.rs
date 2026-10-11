@@ -432,9 +432,52 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> R<T> + Send + 'static) 
 }
 
 /// The API key lives in the OS keychain (Keychain / Credential Manager / Secret Service), never in config.json.
-fn key_entry() -> R<keyring::Entry> {
-    keyring::Entry::new("llc.ex-nihilo.nexus-mod-manager", "nexus-api-key")
-        .map_err(|e| format!("keychain: {e}").into())
+#[cfg(not(debug_assertions))]
+mod key {
+    use super::{AppHandle, R};
+    fn entry() -> R<keyring::Entry> {
+        keyring::Entry::new("llc.ex-nihilo.nexus-mod-manager", "nexus-api-key")
+            .map_err(|e| format!("keychain: {e}").into())
+    }
+    pub fn get(_: &AppHandle) -> Option<String> {
+        entry().ok()?.get_password().ok()
+    }
+    pub fn set(_: &AppHandle, key: &str) -> R<()> {
+        entry()?
+            .set_password(key)
+            .map_err(|e| format!("keychain: {e}").into())
+    }
+    pub fn delete(_: &AppHandle) -> R<()> {
+        match entry()?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(format!("keychain: {e}").into()),
+        }
+    }
+}
+
+/// Dev builds: plaintext file beside config.json, so fresh (re-signed) builds don't trigger keychain prompts.
+#[cfg(debug_assertions)]
+mod key {
+    use super::{config_path, AppHandle, R};
+    fn path(app: &AppHandle) -> R<std::path::PathBuf> {
+        Ok(config_path(app)?.with_file_name("nexus-api-key.dev"))
+    }
+    pub fn get(app: &AppHandle) -> Option<String> {
+        std::fs::read_to_string(path(app).ok()?).ok()
+    }
+    pub fn set(app: &AppHandle, key: &str) -> R<()> {
+        let p = path(app)?;
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+        }
+        Ok(std::fs::write(p, key).map_err(|e| e.to_string())?)
+    }
+    pub fn delete(app: &AppHandle) -> R<()> {
+        match std::fs::remove_file(path(app)?) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string().into()),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Nexus client for the stored key.
@@ -444,9 +487,7 @@ fn nexus_client(app: &AppHandle) -> R<Arc<nexus::Client>> {
     if let Some(c) = &*c {
         return Ok(c.clone());
     }
-    let key = key_entry()?
-        .get_password()
-        .map_err(|_| "not logged in to Nexus")?;
+    let key = key::get(app).ok_or("not logged in to Nexus")?;
     let client = Arc::new(nexus::Client::new(
         &key,
         load_config(app).settings.nexus_api,
@@ -462,9 +503,7 @@ fn adopt_key(app: &AppHandle, key: &str) -> R<User> {
         Err(nmm_core::Error::Unauthorized) => return Err("Nexus rejected this API key".into()),
         r => r?,
     };
-    key_entry()?
-        .set_password(key)
-        .map_err(|e| format!("keychain: {e}"))?;
+    key::set(app, key)?;
     let st = app.state::<App>();
     *st.nexus.lock().unwrap() = None;
     *st.user.lock().unwrap() = Some(user.clone());
@@ -537,10 +576,7 @@ fn nexus_login(app: AppHandle, id: String) -> R<()> {
 #[tauri::command]
 async fn nexus_logout(app: AppHandle) -> R<()> {
     blocking(move || {
-        match key_entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(e) => return Err(format!("keychain: {e}").into()),
-        }
+        key::delete(&app)?;
         let st = app.state::<App>();
         st.nexus.lock().unwrap().take();
         st.user.lock().unwrap().take();
@@ -769,9 +805,7 @@ fn nexus_check(app: AppHandle, id: String, mode: String) {
 fn auto_check(app: AppHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(30));
-        let logged_in = key_entry()
-            .and_then(|e| e.get_password().map_err(|_| "".into()))
-            .is_ok();
+        let logged_in = key::get(&app).is_some();
         if logged_in {
             for mode in load_config(&app).games.keys() {
                 let stale = read(&app, mode).is_ok_and(|m| {
