@@ -323,6 +323,11 @@ fn open_manager(app: &AppHandle, mode: &str) -> R<Manager> {
         .cloned()
         .ok_or("game path not set")?;
     def.tool_folder = cfg.tool_folder;
+    // Heroic / Lutris prefixes live outside the game folder; Proton and in-prefix installs are
+    // found from the path itself.
+    if cfg!(not(windows)) && def.windows_user_dir(&cfg.game_path).is_none() {
+        def.user_dir = discover::wine_user_dir(&cfg.game_path);
+    }
     Manager::open(def, cfg.game_path, cfg.mods_dir)
 }
 

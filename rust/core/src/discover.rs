@@ -2,6 +2,9 @@
 //! `GameStoreInstallationPathDetector`): Steam libraries, GOG Galaxy and plain registry keys,
 //! Epic `.item` manifests, Xbox / Microsoft Store folders. A hit must hold the store's
 //! executable (C# `ValidatePath`).
+//!
+//! On Linux also: Flatpak / Snap Steam, Heroic (GOG + Epic via Legendary) and, for any game,
+//! Lutris; `wine_user_dir` finds the Wine prefix Heroic or Lutris runs a Windows game in.
 
 use crate::game::{GameDef, Store};
 use std::path::{Component, Path, PathBuf};
@@ -18,6 +21,12 @@ pub struct Env {
     pub epic_manifests: Option<PathBuf>,
     /// `XboxGames` / `ModifiableWindowsApps` folders.
     pub xbox_roots: Vec<PathBuf>,
+    /// Heroic config folders (`~/.config/heroic`): `gog_store/installed.json`, `GamesConfig/`.
+    pub heroic: Vec<PathBuf>,
+    /// Folders holding Legendary's `installed.json` (Heroic's Epic backend, or standalone).
+    pub legendary: Vec<PathBuf>,
+    /// Lutris game config folders (`*.yml`).
+    pub lutris: Vec<PathBuf>,
 }
 
 impl Env {
@@ -32,13 +41,37 @@ impl Env {
             PathBuf::from(r"C:\Program Files (x86)\Steam"),
             PathBuf::from(r"C:\Program Files\Steam"),
         ]);
+        let (mut heroic, mut legendary, mut lutris) = (vec![], vec![], vec![]);
         if let Some(h) = dirs::home_dir() {
-            steam_roots.push(h.join(".steam/steam"));
-            steam_roots.push(h.join(".local/share/Steam"));
-            steam_roots.push(h.join("Library/Application Support/Steam"));
+            let flatpak = |app: &str, rel: &str| h.join(".var/app").join(app).join(rel);
+            steam_roots.extend([
+                h.join(".steam/steam"),
+                h.join(".local/share/Steam"),
+                flatpak("com.valvesoftware.Steam", ".local/share/Steam"),
+                flatpak("com.valvesoftware.Steam", "data/Steam"),
+                h.join("snap/steam/common/.local/share/Steam"),
+                h.join("Library/Application Support/Steam"),
+            ]);
+            heroic.extend([
+                h.join(".config/heroic"),
+                flatpak("com.heroicgameslauncher.hgl", "config/heroic"),
+            ]);
+            legendary.extend(heroic.iter().map(|d| d.join("legendaryConfig/legendary")));
+            legendary.push(h.join(".config/legendary"));
+            lutris.extend([
+                h.join(".config/lutris/games"),
+                h.join(".local/share/lutris/games"),
+                flatpak("net.lutris.Lutris", "config/lutris/games"),
+                flatpak("net.lutris.Lutris", "data/lutris/games"),
+            ]);
         }
         steam_roots.retain(|p| p.is_dir());
-        steam_roots.dedup();
+        // ~/.steam/steam is usually a link to ~/.local/share/Steam.
+        let mut seen = std::collections::HashSet::new();
+        steam_roots.retain(|p| seen.insert(std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())));
+        for v in [&mut heroic, &mut legendary, &mut lutris] {
+            v.retain(|p| p.is_dir());
+        }
         let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
         let mut xbox_roots = vec![];
         if cfg!(windows) {
@@ -57,6 +90,9 @@ impl Env {
             registry,
             epic_manifests: program_data.map(|p| p.join(r"Epic\EpicGamesLauncher\Data\Manifests")),
             xbox_roots,
+            heroic,
+            legendary,
+            lutris,
         }
     }
 }
@@ -206,7 +242,163 @@ fn steam(s: &Store, env: &Env) -> Option<PathBuf> {
     })
 }
 
+fn json(path: &Path) -> Option<serde_json::Value> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// Heroic's installed GOG games: (appName, install_path).
+fn heroic_gog(env: &Env) -> Vec<(String, String)> {
+    env.heroic
+        .iter()
+        .filter_map(|h| json(&h.join("gog_store/installed.json")))
+        .flat_map(|v| {
+            v.get("installed")
+                .and_then(|i| i.as_array())
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|g| {
+            Some((
+                g.get("appName")?.as_str()?.to_string(),
+                g.get("install_path")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Legendary's installed Epic games: (app_name, title, install_path).
+fn legendary_games(env: &Env) -> Vec<(String, String, String)> {
+    env.legendary
+        .iter()
+        .filter_map(|d| json(&d.join("installed.json")))
+        .flat_map(|v| v.as_object().cloned().unwrap_or_default().into_values())
+        .filter_map(|g| {
+            let f = |k: &str| g.get(k).and_then(|x| x.as_str()).map(String::from);
+            Some((
+                f("app_name")?,
+                f("title").unwrap_or_default(),
+                f("install_path")?,
+            ))
+        })
+        .collect()
+}
+
+/// Lutris game configs: (exe, prefix) from each `game:` section.
+// ponytail: line-based YAML read of `exe:` / `prefix:`; a real parser if Lutris configs get fancier.
+fn lutris_games(env: &Env) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let mut out = vec![];
+    for dir in &env.lutris {
+        let mut ymls: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "yml"))
+            .collect();
+        ymls.sort();
+        for y in ymls {
+            let Ok(text) = std::fs::read_to_string(&y) else {
+                continue;
+            };
+            let (mut exe, mut prefix, mut in_game) = (None, None, false);
+            for line in text.lines() {
+                if !line.starts_with([' ', '\t']) {
+                    in_game = line.trim_end() == "game:";
+                    continue;
+                }
+                let Some((k, v)) = line.trim().split_once(':') else {
+                    continue;
+                };
+                let v = v.trim().trim_matches(['"', '\'']);
+                match k {
+                    "exe" if in_game && !v.is_empty() => exe = Some(PathBuf::from(v)),
+                    "prefix" if in_game && !v.is_empty() => prefix = Some(PathBuf::from(v)),
+                    _ => {}
+                }
+            }
+            if let Some(exe) = exe {
+                out.push((exe, prefix));
+            }
+        }
+    }
+    out
+}
+
+/// The game folder for `exe` when it is `<folder>/<rel>` for one of `rels` (case-insensitive).
+fn folder_of(exe: &Path, rels: &[&str]) -> Option<PathBuf> {
+    rels.iter().find_map(|rel| {
+        let rel = native(rel);
+        let n = rel.components().count();
+        let comps: Vec<_> = exe.components().collect();
+        let tail = comps.len().checked_sub(n)?;
+        let same = comps[tail..]
+            .iter()
+            .zip(rel.components())
+            .all(|(a, b)| a.as_os_str().eq_ignore_ascii_case(b.as_os_str()));
+        same.then(|| comps[..tail].iter().collect())
+    })
+}
+
+fn lutris(game: &GameDef, env: &Env) -> Option<PathBuf> {
+    let rels: Vec<&str> = game
+        .game_executables
+        .iter()
+        .map(String::as_str)
+        .chain(
+            game.discovery
+                .stores
+                .iter()
+                .filter_map(|s| s.executable_name.as_deref()),
+        )
+        .collect();
+    lutris_games(env)
+        .into_iter()
+        .find_map(|(exe, _)| folder_of(&exe, &rels).filter(|p| p.is_dir()))
+}
+
+/// The Windows user folder of the Wine prefix Heroic or Lutris runs the game at `game_path` in.
+pub fn wine_user_dir(game_path: &Path) -> Option<PathBuf> {
+    wine_user_dir_in(game_path, &Env::system())
+}
+
+pub fn wine_user_dir_in(game_path: &Path, env: &Env) -> Option<PathBuf> {
+    let same = |p: &str| Path::new(p) == game_path;
+    let apps: Vec<String> = heroic_gog(env)
+        .into_iter()
+        .filter(|(_, p)| same(p))
+        .map(|(a, _)| a)
+        .chain(
+            legendary_games(env)
+                .into_iter()
+                .filter(|(_, _, p)| same(p))
+                .map(|(a, _, _)| a),
+        )
+        .collect();
+    let heroic = apps.iter().find_map(|app| {
+        env.heroic.iter().find_map(|h| {
+            let v = json(&h.join("GamesConfig").join(format!("{app}.json")))?;
+            let prefix = v.get(app)?.get("winePrefix")?.as_str()?;
+            crate::game::prefix_user(Path::new(prefix))
+        })
+    });
+    heroic.or_else(|| {
+        lutris_games(env)
+            .into_iter()
+            .filter(|(exe, _)| exe.starts_with(game_path))
+            .find_map(|(_, prefix)| crate::game::prefix_user(&prefix?))
+    })
+}
+
 fn gog(s: &Store, env: &Env) -> Option<PathBuf> {
+    let heroic = s.id.as_deref().and_then(|id| {
+        heroic_gog(env)
+            .into_iter()
+            .find(|(a, _)| a == id)
+            .and_then(|(_, p)| validate(&p, s))
+    });
+    if heroic.is_some() {
+        return heroic;
+    }
     let value = s.registry_value_name.as_deref().unwrap_or("PATH");
     if let Some(k) = &s.registry_key {
         return validate(&(env.registry)(k, value)?, s);
@@ -230,6 +422,21 @@ fn registry(s: &Store, env: &Env) -> Option<PathBuf> {
 }
 
 fn epic(s: &Store, env: &Env) -> Option<PathBuf> {
+    let legendary = legendary_games(env)
+        .into_iter()
+        .find_map(|(app, title, path)| {
+            let by_id =
+                s.id.as_deref()
+                    .is_some_and(|id| app.eq_ignore_ascii_case(id));
+            let by_name = s
+                .install_folder_name
+                .as_deref()
+                .is_some_and(|n| title.eq_ignore_ascii_case(n));
+            (by_id || by_name).then(|| validate(&path, s)).flatten()
+        });
+    if legendary.is_some() {
+        return legendary;
+    }
     let dir = env.epic_manifests.as_ref()?;
     let mut items: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
@@ -336,6 +543,7 @@ pub fn detect_in(game: &GameDef, env: &Env) -> Option<PathBuf> {
             "registry" => registry(s, env),
             _ => None,
         })
+        .or_else(|| lutris(game, env))
 }
 
 #[cfg(test)]
@@ -354,6 +562,9 @@ mod tests {
             registry: Box::new(move |k, v| map.get(&(k.to_lowercase(), v.to_lowercase())).cloned()),
             epic_manifests: None,
             xbox_roots: vec![],
+            heroic: vec![],
+            legendary: vec![],
+            lutris: vec![],
         }
     }
 
@@ -440,6 +651,91 @@ mod tests {
             r"%NMM_TEST_ROOT%/GOG Games/Launcher",
         )]);
         assert_eq!(detect_in(&g, &e), Some(dir));
+    }
+
+    #[test]
+    fn heroic_legendary_and_lutris() {
+        let t = tempfile::tempdir().unwrap();
+        let heroic = t.path().join("heroic");
+        let sdv = t.path().join("Games/Heroic/Stardew Valley");
+        touch(&sdv.join("Stardew Valley.exe"));
+        fs::create_dir_all(heroic.join("gog_store")).unwrap();
+        fs::write(
+            heroic.join("gog_store/installed.json"),
+            serde_json::json!({"installed": [{"appName": "1453375253", "install_path": sdv, "platform": "windows"}]}).to_string(),
+        )
+        .unwrap();
+        let prefix = t.path().join("Prefixes/default/Stardew Valley");
+        fs::create_dir_all(prefix.join("drive_c/users/Public")).unwrap();
+        fs::create_dir_all(prefix.join("drive_c/users/someone")).unwrap();
+        fs::create_dir_all(heroic.join("GamesConfig")).unwrap();
+        fs::write(
+            heroic.join("GamesConfig/1453375253.json"),
+            serde_json::json!({"1453375253": {"winePrefix": prefix}}).to_string(),
+        )
+        .unwrap();
+        let mut e = env(&[]);
+        e.heroic = vec![heroic];
+        let sdv_game = crate::game::find("stardewvalley").unwrap();
+        assert_eq!(detect_in(&sdv_game, &e), Some(sdv.clone()));
+        assert_eq!(
+            wine_user_dir_in(&sdv, &e),
+            Some(prefix.join("drive_c/users/someone"))
+        );
+
+        // Epic through Legendary, by app name.
+        let leg = t.path().join("legendary");
+        let cp = t.path().join("Games/Heroic/Cyberpunk 2077");
+        touch(&cp.join("bin/x64/Cyberpunk2077.exe"));
+        fs::create_dir_all(&leg).unwrap();
+        fs::write(
+            leg.join("installed.json"),
+            serde_json::json!({"Ginger": {"app_name": "Ginger", "title": "Fancy", "install_path": cp}}).to_string(),
+        )
+        .unwrap();
+        e.legendary = vec![leg];
+        let epic = game(
+            serde_json::json!([{ "store": "Epic", "id": "ginger", "executableName": "bin\\x64\\Cyberpunk2077.exe" }]),
+        );
+        assert_eq!(detect_in(&epic, &e), Some(cp));
+
+        // Lutris: any game, matched by executable; its prefix holds the user folders.
+        let lut = t.path().join("lutris");
+        fs::create_dir_all(&lut).unwrap();
+        let pfx = t.path().join("Games/skyrim");
+        let sse =
+            pfx.join("drive_c/Program Files (x86)/Steam/steamapps/common/Skyrim Special Edition");
+        touch(&sse.join("SkyrimSE.exe"));
+        fs::create_dir_all(pfx.join("drive_c/users/steamuser")).unwrap();
+        fs::write(
+            lut.join("skyrim-1.yml"),
+            format!(
+                "game:\n  exe: {}\n  prefix: {}\nsystem:\n  exe: nope\n",
+                sse.join("SkyrimSE.exe").display(),
+                pfx.display()
+            ),
+        )
+        .unwrap();
+        e.lutris = vec![lut];
+        let sky = crate::game::find("SkyrimSE").unwrap();
+        assert_eq!(detect_in(&sky, &e), Some(sse.clone()));
+        assert_eq!(
+            wine_user_dir_in(&sse, &e),
+            Some(pfx.join("drive_c/users/steamuser"))
+        );
+        // A game folder inside drive_c resolves its prefix without any launcher config.
+        if cfg!(not(windows)) {
+            assert_eq!(
+                sky.windows_user_dir(&sse),
+                Some(pfx.join("drive_c/users/steamuser"))
+            );
+            assert_eq!(
+                sky.plugins_file(&sse).unwrap(),
+                pfx.join(
+                    "drive_c/users/steamuser/AppData/Local/Skyrim Special Edition/plugins.txt"
+                )
+            );
+        }
     }
 
     #[test]

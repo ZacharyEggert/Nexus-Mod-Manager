@@ -269,6 +269,25 @@ fn expand_in(
     }
 }
 
+/// A Wine prefix's user folder: `steamuser` (Proton), else `$USER`, else the only other one
+/// besides `Public`.
+pub fn prefix_user(prefix: &Path) -> Option<PathBuf> {
+    let users = prefix.join("drive_c/users");
+    let mut names = vec!["steamuser".to_string()];
+    names.extend(std::env::var("USER").ok());
+    if let Some(p) = names.iter().map(|n| users.join(n)).find(|p| p.is_dir()) {
+        return Some(p);
+    }
+    let mut others: Vec<PathBuf> = std::fs::read_dir(&users)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir() && !e.file_name().eq_ignore_ascii_case("Public"))
+        .map(|e| e.path())
+        .collect();
+    others.sort();
+    others.into_iter().next()
+}
+
 /// World of Tanks `res_mods/<version>`: `<version>` in `version.xml`, `\d+\.\d+\.\w+` (C# `ReadVersion`).
 fn wot_version(game_path: &Path) -> String {
     let read = || -> Option<String> {
@@ -328,15 +347,27 @@ impl GameDef {
         s.rsplit(['\\', '/']).next()
     }
 
-    /// The Proton prefix's Windows user folder, for a Windows game run through Steam Play:
-    /// `<library>/steamapps/compatdata/<appid>/pfx/drive_c/users/steamuser`. None on Windows,
-    /// for native games, or before the game's first launch created the prefix.
+    /// The Windows user folder (`<prefix>/drive_c/users/<name>`) a Windows game run through Wine
+    /// keeps its settings in: `user_dir` when set (Heroic / Lutris / bottles, found by `discover`),
+    /// else the prefix the game folder sits in (`.../drive_c/...`), else its Proton prefix
+    /// `<library>/steamapps/compatdata/<appid>/pfx`. None on Windows, for native games, or before
+    /// the first launch created the prefix.
     pub fn windows_user_dir(&self, game_path: &Path) -> Option<PathBuf> {
         if self.user_dir.is_some() {
             return self.user_dir.clone();
         }
         if cfg!(windows) {
             return None;
+        }
+        let in_prefix = game_path
+            .ancestors()
+            .find(|a| {
+                a.file_name()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("drive_c"))
+            })
+            .and_then(|c| prefix_user(c.parent()?));
+        if in_prefix.is_some() {
+            return in_prefix;
         }
         let steamapps = game_path.ancestors().find(|a| {
             a.file_name()
@@ -347,13 +378,7 @@ impl GameDef {
             .iter()
             .filter(|s| s.store == "Steam")
             .filter_map(|s| s.id.as_deref())
-            .map(|id| {
-                steamapps
-                    .join("compatdata")
-                    .join(id)
-                    .join("pfx/drive_c/users/steamuser")
-            })
-            .find(|p| p.is_dir())
+            .find_map(|id| prefix_user(&steamapps.join("compatdata").join(id).join("pfx")))
     }
 
     /// `expand` for this game: Windows user folders resolve inside its Proton prefix when it has one.
