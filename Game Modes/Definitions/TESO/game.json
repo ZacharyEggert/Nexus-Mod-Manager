@@ -24,14 +24,14 @@
         "registryKey": "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Zenimax_Online\\Launcher",
         "registryValueName": "InstallPath",
         "executableName": "game\\client\\eso.exe",
-        "pathSuffix": "The Elder Scrolls Online EU"
+        "pathSuffix": "..\\The Elder Scrolls Online EU"
       },
       {
         "store": "Registry",
         "registryKey": "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Zenimax_Online\\Launcher",
         "registryValueName": "InstallPath",
         "executableName": "game\\client\\eso.exe",
-        "pathSuffix": "The Elder Scrolls Online"
+        "pathSuffix": "..\\The Elder Scrolls Online"
       }
     ]
   },
