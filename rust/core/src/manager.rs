@@ -1269,10 +1269,12 @@ impl Manager {
 
     /// Run an intent change (+ its deploy) all-or-nothing w.r.t. cancel: if `op` is cancelled,
     /// restore the previous mod list and link mode, deploy back to them (not cancellable), and
-    /// delete files of mods `op` was installing. Still returns `Err(Cancelled)`.
+    /// delete files of mods `op` was installing, and put the load order back. Still returns
+    /// `Err(Cancelled)`.
     pub fn transact(&mut self, op: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
         let (mods, link_mode) = (self.state.mods.clone(), self.state.link_mode);
         let profiles = self.state.profiles.clone();
+        let plugins = plugins::Policy::new(&self.game, &self.game_path).map(|p| p.read());
         let result = op(self);
         if !matches!(result, Err(Error::Cancelled)) {
             return result;
@@ -1296,6 +1298,10 @@ impl Manager {
         let rolled_back = self.deploy();
         self.task = task;
         rolled_back.inspect_err(|e| tracing::error!("rollback failed: {e}"))?;
+        // The deploy re-added plugins `op` had unlinked as fresh (last, active); restore them.
+        if let Some(Err(e)) = plugins.map(|p| self.set_plugins(&p)) {
+            tracing::warn!("load order not restored after rollback: {e}");
+        }
         tracing::info!("rolled back");
         // Files of a mod the op added (or was removing) are kept or deleted per the restored list.
         self.resolve_pending()?;
@@ -2656,8 +2662,13 @@ UncheckEsp B.esp"#;
         assert_eq!(ids(&m), ["Sky-1.0", "C"]);
         assert_eq!(m.state.profiles["p"], ["Sky-1.0", "C"]);
         assert!(data.join("old.txt").exists() && !mods.join("VirtualInstall/Sky-2.0").exists());
-        // ponytail: a rolled-back deploy re-adds the plugins it unlinked as new (any cancelled op).
-        fs::write(&txt, "*C.esp\r\nA.esp\r\n").unwrap();
+        let header =
+            "# This file is used by the game to keep track of your downloaded content.\r\n";
+        // Rollback keeps the load order: A.esp stays below C.esp, inactive.
+        assert_eq!(
+            fs::read_to_string(&txt).unwrap(),
+            format!("{header}*C.esp\r\nA.esp\r\n")
+        );
 
         let s = add(
             &mut m,
@@ -2673,8 +2684,6 @@ UncheckEsp B.esp"#;
         // Same slot, same plugin position and state, same profiles; files it dropped are gone.
         assert_eq!(ids(&m), ["Sky-2.0", "C"]);
         assert_eq!(m.state.mods[0].nexus.as_ref().unwrap().version, "2.0");
-        let header =
-            "# This file is used by the game to keep track of your downloaded content.\r\n";
         assert_eq!(
             fs::read_to_string(&txt).unwrap(),
             format!("{header}*C.esp\r\nA.esp\r\n")
