@@ -3,7 +3,7 @@
   import * as api from './lib/api';
   import { LINK_MODES } from './lib/ui.svelte';
 
-  let { lib, op, repair }: { lib: api.Library; op: (label: string, o: api.Op) => void; repair: (adopt?: boolean) => void } = $props();
+  let { lib, op, repair, loose }: { lib: api.Library; op: (label: string, o: api.Op) => void; repair: (adopt?: boolean) => void; loose: () => void } = $props();
 
   const order = $derived(Object.fromEntries(lib.mods.map((m, i) => [m.id, i])));
   const name = (id: string) => lib.mods[order[id]]?.name ?? id;
@@ -33,6 +33,9 @@
   </select>. Lower in the list wins file conflicts.
   <button class="btn" title="Check the game folder against your mods and fix what’s out of step, e.g. after a crash or a deleted deploy.journal"
     onclick={() => repair()}>Scan &amp; repair</button>
+  {#if lib.has_base_files}
+    <button class="btn" title="Find files in the game's Data folder that aren't from the base game or your mods" onclick={loose}>Loose files…</button>
+  {/if}
 </p>
 {#if lib.archive_invalidation !== null}
   <!-- keyed: a refused change leaves the value as it was, and only a re-render resets the box -->

@@ -3,58 +3,15 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Bundled game.json + Categories.xml for each data-driven mode, index-aligned.
-macro_rules! games {
-    ($($id:literal),*) => {
-        const DEFINITIONS: &[&str] =
-            &[$(include_str!(concat!("../../../Game Modes/Definitions/", $id, "/game.json"))),*];
-        const CATEGORIES: &[&str] =
-            &[$(include_str!(concat!("../../../Game Modes/Definitions/", $id, "/Categories.xml"))),*];
-    };
+/// One bundled definition folder (see build.rs).
+pub(crate) struct Bundle {
+    game: &'static str,
+    categories: &'static str,
+    base_files: Option<&'static str>,
+    pub(crate) tools: Option<&'static str>,
 }
 
-games!(
-    "BaldursGate3",
-    "BreakingWheel",
-    "Cyberpunk2077",
-    "DarkSouls",
-    "DarkSouls2",
-    "DragonAge",
-    "DragonAge2",
-    "DragonsDogma",
-    "Enderal",
-    "EnderalSE",
-    "Fallout3",
-    "Fallout4",
-    "Fallout4VR",
-    "FalloutNV",
-    "Grimrock",
-    "HogwartsLegacy",
-    "MonsterHunterWorld",
-    "Morrowind",
-    "MountAndBlade2Bannerlord",
-    "NoMansSky",
-    "Oblivion",
-    "OblivionRemastered",
-    "Skyrim",
-    "SkyrimGOG",
-    "SkyrimSE",
-    "SkyrimVR",
-    "Starbound",
-    "Starfield",
-    "StateOfDecay",
-    "Subnautica",
-    "SubnauticaBelowZero",
-    "TESO",
-    "TheSims4",
-    "WarThunder",
-    "Witcher2",
-    "Witcher3",
-    "WorldOfTanks",
-    "XCOM2",
-    "XRebirth",
-    "stardewvalley"
-);
+include!(concat!(env!("OUT_DIR"), "/bundled.rs"));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +49,8 @@ pub struct GameDef {
     #[serde(default)]
     pub ordered_required_tool_file_names: Vec<String>,
     pub required_tool_error_message: Option<String>,
+    #[serde(default)]
+    pub storage: StorageDef,
     /// Runtime: the user's folder for `required_tool_name`.
     #[serde(skip)]
     pub tool_folder: Option<PathBuf>,
@@ -101,9 +60,23 @@ pub struct GameDef {
     pub user_dir: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageDef {
+    /// Modes whose downloaded mods this one can use (both must name each other).
+    #[serde(default)]
+    pub share_mods_storage_with: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GamebryoDef {
+    /// Loaders in the game folder (`skse64_loader.exe`); the first one present is the script extender launch.
+    #[serde(default)]
+    pub script_extender_executables: Vec<String>,
+    /// Files that make the plain game executable load the script extender itself (e.g. an ASI loader).
+    #[serde(default)]
+    pub script_extender_auto_load_files: Vec<String>,
     pub plugins_file_path: Option<String>,
     /// `oblivion`, `fallout3`, `falloutnv`: which archive invalidation the game needs.
     pub archive_invalidation_profile: Option<String>,
@@ -211,16 +184,28 @@ pub struct ModInstallDef {
 #[serde(rename_all = "camelCase")]
 pub struct LauncherDef {
     pub default_executable: Option<String>,
+    /// Launch label (`Launch Skyrim Special Edition`).
+    pub plain_command_text: Option<String>,
+    /// Whether a custom launch command may be set (C# default: allowed).
+    pub allow_custom_command: Option<bool>,
 }
 
 pub fn all() -> Vec<GameDef> {
-    DEFINITIONS
+    BUNDLED
         .iter()
-        .map(|s| {
-            serde_json::from_str(s.trim_start_matches('\u{feff}'))
+        .map(|b| {
+            serde_json::from_str(b.game.trim_start_matches('\u{feff}'))
                 .expect("bundled game.json is valid")
         })
         .collect()
+}
+
+/// The bundle of `mode_id`.
+pub(crate) fn bundle(mode_id: &str) -> Option<&'static Bundle> {
+    let i = all()
+        .iter()
+        .position(|g| g.mode_id.eq_ignore_ascii_case(mode_id))?;
+    BUNDLED.get(i)
 }
 
 pub fn find(mode_id: &str) -> Option<GameDef> {
@@ -523,6 +508,56 @@ impl GameDef {
         nexus_domain(&self.mode_id)
     }
 
+    /// Game files the base install ships (`resources.baseFilesPath`), relative to the plugin folder.
+    pub fn base_files(&self) -> Vec<String> {
+        bundle(&self.mode_id)
+            .and_then(|b| b.base_files)
+            .map(|t| {
+                t.trim_start_matches('\u{feff}')
+                    .lines()
+                    .map(|l| l.trim().replace('\\', "/"))
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The script extender launch (C# `GetInstalledScriptExtenderCommand`): the plain executable
+    /// when an auto-load file is installed, else the first installed loader. With its display name.
+    pub fn script_extender(&self, game_path: &Path) -> Option<(String, PathBuf)> {
+        let gb = self.gamebryo.as_ref()?;
+        let present = |f: &String| crate::manager::exists_ci(game_path, f);
+        let (source, exe) = if gb.script_extender_auto_load_files.iter().any(present) {
+            (
+                gb.script_extender_executables.first()?.clone(),
+                self.executable(game_path, None)?,
+            )
+        } else {
+            let f = gb.script_extender_executables.iter().find(|f| present(f))?;
+            (f.clone(), expand(f, game_path))
+        };
+        let stem = source.rsplit(['\\', '/']).next().unwrap_or(&source);
+        let stem = stem.split('.').next().unwrap_or(stem);
+        let base = match stem.to_ascii_lowercase().find("_loader") {
+            Some(i) if i > 0 => &stem[..i],
+            _ => stem,
+        };
+        let name = match base.to_ascii_lowercase().as_str() {
+            "nvse" | "fose" | "f4se" | "obse" | "obse64" | "mwse" => base.to_ascii_uppercase(),
+            "skse" | "skse64" => "SKSE".into(),
+            "" => "Script Extender".into(),
+            _ => base.into(),
+        };
+        Some((name, exe))
+    }
+
+    pub fn allows_custom_command(&self) -> bool {
+        self.launcher
+            .as_ref()
+            .and_then(|l| l.allow_custom_command)
+            .unwrap_or(true)
+    }
+
     pub fn default_executable(&self) -> Option<&str> {
         self.launcher
             .as_ref()
@@ -532,7 +567,19 @@ impl GameDef {
 
     /// What Launch runs: the user's custom command (relative = in the game folder), else the definition's.
     pub fn executable(&self, game_path: &Path, custom: Option<&str>) -> Option<PathBuf> {
-        let exe = expand(custom.or(self.default_executable())?, game_path);
+        let custom = custom.map(crate::discover::expand_env);
+        let mut exe = expand(custom.as_deref().or(self.default_executable())?, game_path);
+        // C# `GetPlainLaunchCommand`: the default, else the first game executable that exists.
+        if custom.is_none() && !exe.exists() {
+            if let Some(other) = self
+                .game_executables
+                .iter()
+                .map(|e| expand(e, game_path))
+                .find(|p| p.exists())
+            {
+                exe = other;
+            }
+        }
         // Definitions name the Windows .exe; native mac/Linux builds ship the same name without it.
         if cfg!(not(windows)) && !exe.exists() && has_ext(&exe.to_string_lossy(), &[".exe".into()])
         {
@@ -551,16 +598,34 @@ impl GameDef {
     }
 }
 
+/// Modes that share `mode_id`'s downloaded mods (C# `GameModeStorageSharingRegistry`: both sides
+/// must declare it), plus `mode_id` itself, sorted. The first is the group's storage key.
+pub fn storage_group(mode_id: &str) -> Vec<String> {
+    let all = all();
+    let declares = |a: &str, b: &str| {
+        all.iter()
+            .find(|g| g.mode_id == a)
+            .is_some_and(|g| g.storage.share_mods_storage_with.iter().any(|x| x == b))
+    };
+    let mut out: Vec<String> = all
+        .iter()
+        .filter(|g| {
+            g.mode_id.eq_ignore_ascii_case(mode_id)
+                || (declares(mode_id, &g.mode_id) && declares(&g.mode_id, mode_id))
+        })
+        .map(|g| g.mode_id.clone())
+        .collect();
+    out.sort();
+    out
+}
+
 /// Nexus categories shipped with the mode (C# `Categories.xml`), used until the API's are fetched.
 /// "Unassigned" (id 0) is left out: no category is `None`.
 pub fn default_categories(mode_id: &str) -> Vec<crate::nexus::Category> {
-    let Some(i) = all()
-        .iter()
-        .position(|g| g.mode_id.eq_ignore_ascii_case(mode_id))
-    else {
+    let Some(b) = bundle(mode_id) else {
         return vec![];
     };
-    let xml = CATEGORIES[i].trim_start_matches('\u{feff}');
+    let xml = b.categories.trim_start_matches('\u{feff}');
     let doc = roxmltree::Document::parse(xml).expect("bundled Categories.xml is valid");
     doc.descendants()
         .filter(|n| n.has_tag_name("category"))
@@ -627,6 +692,9 @@ mod tests {
             ["SkyrimGOG", "SkyrimSE", "SkyrimVR"]
         );
         assert_eq!(super::modes_for_domain("NewVegas"), ["FalloutNV"]);
+        assert_eq!(super::storage_group("SkyrimGOG"), ["SkyrimGOG", "SkyrimSE"]);
+        assert_eq!(super::storage_group("SkyrimVR"), ["SkyrimVR"]);
+        assert_eq!(sse.base_files().len(), 24);
         assert_eq!(super::modes_for_domain("morrowind"), ["Morrowind"]);
         assert_eq!(
             super::modes_for_domain("skyrimspecialedition"),

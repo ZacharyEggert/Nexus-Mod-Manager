@@ -6,11 +6,13 @@ pub mod fomod;
 pub mod game;
 pub mod ini;
 pub mod invalidation;
+pub mod launch;
 pub mod loot;
 pub mod manager;
 pub mod nexus;
 pub mod plugins;
 pub mod special;
+pub mod tools;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -2,7 +2,13 @@
   import * as api from './lib/api';
   import { run, status } from './lib/ui.svelte';
 
-  let { games, oninstall }: { games: api.GameInfo[]; oninstall: (d: api.Download) => void } = $props();
+  let { games, oninstall }: { games: api.GameInfo[]; oninstall: (d: api.Download, mode?: string) => void } = $props();
+  /** Configured games a download can go to: its own, plus those sharing its downloads. */
+  const targets = (d: api.Download) => {
+    const own = games.find((g) => g.mode_id === d.mode);
+    return [d.mode, ...(own?.shares_with ?? [])].filter((m) => games.find((g) => g.mode_id === m)?.game_path);
+  };
+  let target: Record<string, string> = $state({});
 
   let list = $state<api.Download[]>([]);
   let url = $state('');
@@ -71,7 +77,12 @@
             {:else if d.state === 'paused' || d.state === 'failed'}
               <button class="btn" onclick={() => api.downloadResume(d.id)}>{d.state === 'failed' ? 'Retry' : 'Resume'}</button>
             {:else}
-              <button class="btn primary" onclick={() => oninstall(d)}>Install</button>
+              {#if targets(d).length > 1}
+                <select aria-label="Install into" value={target[d.id] ?? d.mode} onchange={(e) => (target[d.id] = e.currentTarget.value)}>
+                  {#each targets(d) as m}<option value={m}>{gameName(m)}</option>{/each}
+                </select>
+              {/if}
+              <button class="btn primary" onclick={() => oninstall(d, target[d.id] ?? d.mode)}>Install</button>
             {/if}
             <button class="btn" onclick={() => remove(d)}>Remove</button>
           </td>

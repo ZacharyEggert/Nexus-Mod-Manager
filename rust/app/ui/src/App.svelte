@@ -32,6 +32,7 @@
     const g = games.find((x) => x.mode_id === mode);
     view = { kind: 'game', mode, setup: !g?.game_path };
     lib = null;
+    launchOpts = null;
     if (g?.game_path) await reload();
   }
 
@@ -42,6 +43,7 @@
     try {
       const l = await api.library(mode);
       if (view.kind === 'game' && view.mode === mode) lib = l;
+      loadLaunchOptions(mode, launchId);
     } catch (e) {
       status(String(e), true);
       view = { kind: 'game', mode, setup: true };
@@ -95,15 +97,45 @@
     op(`Saving profile ${name}`, { op: 'save_profile', name });
   }
 
-  function launch() {
+  let launchOpts: api.LaunchOptions | null = $state(null);
+  let launchId = $state('');
+
+  async function launch() {
     if (!cur) return;
+    const mode = cur.mode_id;
+    const opt = launchOpts?.options.find((o) => o.id === launchId);
+    if (opt && !opt.exe) {
+      // A tool not found yet: ask for its folder instead.
+      if (opt.id.startsWith('tool:') && (await run(`Setting ${opt.label.replace(/^Launch /, '')} folder`, () => api.toolFolder(mode, opt.id)).catch(() => false)))
+        await loadLaunchOptions(mode, opt.id);
+      return;
+    }
     // Out of sync = a deploy failed partway; ask once (second click launches anyway).
     if (lib && !lib.in_sync && !launchAnyway) {
       launchAnyway = true;
       return status('Some mod files aren’t deployed. Redeploy first, or click Launch again to launch anyway.', true);
     }
     launchAnyway = false;
-    run(`Launching ${cur.name}`, () => api.launch(cur.mode_id)).catch(() => {});
+    run(opt?.label ?? `Launching ${cur.name}`, () => api.launch(mode, launchId || null)).catch(() => {});
+  }
+
+  async function loadLaunchOptions(mode: string, keep?: string) {
+    const o = await api.launchOptions(mode).catch(() => null);
+    if (view.kind !== 'game' || view.mode !== mode) return;
+    launchOpts = o;
+    launchId = keep && o?.options.some((x) => x.id === keep) ? keep : (o?.default ?? '');
+  }
+
+  /** List loose Data files (not base game, not from mods) and offer to move them out. */
+  async function looseFiles() {
+    if (view.kind !== 'game') return;
+    const mode = view.mode;
+    const files = await run('Looking for loose files', () => api.looseFiles(mode)).catch(() => null);
+    if (!files) return;
+    if (!files.length) return status('No loose files: everything in the game folder is base game or from your mods.');
+    const shown = files.slice(0, 15).join('\n') + (files.length > 15 ? `\n…and ${files.length - 15} more` : '');
+    if (await api.ask('Loose files', `${count(files.length, 'file')} in the game folder aren’t from the base game or your mods:\n\n${shown}\n\nMove them out of the game (into the mods folder’s LooseFiles)?`))
+      op('Moving loose files', { op: 'purge_loose' });
   }
 
   /** Route Nexus links to a configured game they belong to (the open one if it matches). */
@@ -128,8 +160,8 @@
   }
 
   /** Install a finished download into its game. */
-  async function installDownload(d: api.Download) {
-    await select(d.mode);
+  async function installDownload(d: api.Download, mode = d.mode) {
+    await select(mode);
     if (view.kind === 'game' && !view.setup) install(d.path, d.id);
   }
 
@@ -187,7 +219,12 @@
       <button class="btn" onclick={() => { if (profile) op(`Deleting profile ${profile}`, { op: 'delete_profile', name: profile }); profile = ''; }}>Delete</button>
       <button class="btn" onclick={() => view.kind === 'game' && (view = { ...view, setup: true })}>Settings</button>
       <button class="btn" onclick={checkUpdates}>Check for updates</button>
-      <button class="btn" onclick={launch}>Launch</button>
+      {#if launchOpts && launchOpts.options.length > 1}
+        <select aria-label="What to launch" bind:value={launchId}>
+          {#each launchOpts.options as o (o.id)}<option value={o.id}>{o.exe ? o.label : `${o.label} (set folder…)`}</option>{/each}
+        </select>
+      {/if}
+      <button class="btn" onclick={launch}>{launchOpts?.options.find((o) => o.id === launchId)?.exe === null ? 'Set folder…' : 'Launch'}</button>
     {/if}
   </div>
 
@@ -209,7 +246,7 @@
         {#if lib.uses_plugins && tab === 'plugins'}
           <Plugins mode={view.mode} loot={lib.loot} />
         {:else}
-          <Library {lib} {op} {repair} />
+          <Library {lib} {op} {repair} loose={looseFiles} />
         {/if}
       {/if}
     {/if}

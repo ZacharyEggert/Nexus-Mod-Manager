@@ -852,6 +852,88 @@ impl Manager {
         result
     }
 
+    /// Files in the plugin folder that are neither base game (`baseFilesPath`), deployed by this
+    /// manager, official Creation content, nor the load order files: C# `CheckLooseFiles`. None
+    /// for games without a base-file list, where the game's own files can't be told apart.
+    pub fn loose_files(&self) -> Option<Vec<String>> {
+        let base = self.game.base_files();
+        if base.is_empty() {
+            return None;
+        }
+        let root = self
+            .game
+            .plugin_dir(&self.game_path)
+            .unwrap_or_else(|| self.install_root());
+        let mut keep: HashSet<String> = base.iter().map(|b| b.to_lowercase()).collect();
+        let policy = plugins::Policy::new(&self.game, &self.game_path);
+        let mut stems: HashSet<String> = HashSet::new();
+        if let Some(p) = &policy {
+            for f in [&p.plugins_file, &p.load_order_file] {
+                if let Ok(r) = f.strip_prefix(&root) {
+                    keep.insert(r.to_string_lossy().replace('\\', "/").to_lowercase());
+                }
+            }
+            // Creation Club plugins (.ccc) and their archives (`ccXYZ - Textures.bsa`).
+            for o in &p.official {
+                let l = o.to_lowercase();
+                stems.insert(l.rsplit_once('.').map_or(l.clone(), |(s, _)| s.to_string()));
+                keep.insert(l);
+            }
+        }
+        let deployed: HashSet<&str> = self
+            .state
+            .deployed
+            .iter()
+            .filter(|(_, d)| !d.game_root)
+            .map(|(k, _)| k.as_str())
+            .collect();
+        let install_root = self.install_root();
+        let mut out: Vec<String> = files_under(&root)
+            .iter()
+            .filter_map(|f| {
+                let r = rel(f, &root);
+                let l = r.to_lowercase();
+                let deployed_key = f
+                    .strip_prefix(&install_root)
+                    .map(|x| x.to_string_lossy().replace('\\', "/").to_lowercase());
+                let ours = deployed_key.is_ok_and(|k| deployed.contains(k.as_str()));
+                let creation = !l.contains('/')
+                    && stems
+                        .iter()
+                        .any(|s| l.starts_with(s.as_str()) && l[s.len()..].starts_with([' ', '.']));
+                (!keep.contains(&l) && !ours && !creation).then_some(r)
+            })
+            .collect();
+        out.sort_by_key(|f| f.to_lowercase());
+        Some(out)
+    }
+
+    /// Move `loose_files` out of the game into `<mods>/LooseFiles/<unix time>/`, where they can be
+    /// put back by hand. Base game, deployed and Creation files are never touched. Returns the folder.
+    pub fn purge_loose(&self) -> R<Option<PathBuf>> {
+        let Some(files) = self.loose_files().filter(|f| !f.is_empty()) else {
+            return Ok(None);
+        };
+        let root = self
+            .game
+            .plugin_dir(&self.game_path)
+            .unwrap_or_else(|| self.install_root());
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let dest = self.mods_dir.join("LooseFiles").join(now.to_string());
+        let n = files.len() as u64;
+        for (i, f) in files.iter().enumerate() {
+            self.task.step("Moving loose files", i as u64, n)?;
+            let (from, to) = (root.join(f), dest.join(f));
+            fs::create_dir_all(to.parent().unwrap()).at(to.parent().unwrap())?;
+            move_file(&from, &to)?;
+            prune(from.parent().unwrap(), &root);
+        }
+        tracing::info!(game = %self.game.mode_id, files = n, to = %dest.display(), "purged loose files");
+        Ok(Some(dest))
+    }
+
     /// A question to ask before removing `id` (State of Decay / X Rebirth save-recorded mods).
     pub fn removal_warning(&self, id: &str) -> Option<String> {
         crate::special::removal_warning(self.state.mods.iter().find(|m| m.id == id)?)
@@ -2709,6 +2791,42 @@ mod tests {
         );
         assert!(!m.mods_dir.join("GameRootInstall/skse64").exists());
         assert!(!m.mods_dir.join("GameRootBackup/steam_api64.dll").exists());
+    }
+
+    #[test]
+    fn loose_files_spare_base_deployed_and_creations() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        for f in [
+            "Skyrim.esm",
+            "Skyrim - Textures0.bsa",
+            "loose.esp",
+            "textures/old.dds",
+            "ccBGSSSE001-Fish.esm",
+            "ccBGSSSE001-Fish.bsa",
+        ] {
+            fs::create_dir_all(data.join(f).parent().unwrap()).unwrap();
+            fs::write(data.join(f), "x").unwrap();
+        }
+        fs::write(game_path.join("Skyrim.ccc"), "ccBGSSSE001-Fish.esm\r\n").unwrap();
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        game.user_dir = Some(t.path().join("user"));
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
+        let z = t.path().join("Mod.zip");
+        zip(&z, &[("Data/mod.esp", "m")]);
+        m.install(m.stage(&z).unwrap(), None).unwrap();
+        assert_eq!(m.loose_files().unwrap(), ["loose.esp", "textures/old.dds"]);
+        let to = m.purge_loose().unwrap().unwrap();
+        assert!(to.join("textures/old.dds").exists() && !data.join("textures").exists());
+        assert!(data.join("Skyrim.esm").exists() && data.join("mod.esp").exists());
+        assert!(data.join("ccBGSSSE001-Fish.bsa").exists());
+        assert_eq!(m.loose_files().unwrap(), Vec::<String>::new());
+        // No base list: no loose-file view at all.
+        let mut sdv = crate::game::find("stardewvalley").unwrap();
+        sdv.user_dir = Some(t.path().join("user"));
+        let m = Manager::open(sdv, game_path, t.path().join("mods2")).unwrap();
+        assert_eq!(m.loose_files(), None);
     }
 
     #[test]

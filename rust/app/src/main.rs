@@ -3,6 +3,7 @@
 use nmm_core::download::{self, Download, Downloads};
 use nmm_core::fomod::{Eval, ModuleConfig, Selection};
 use nmm_core::invalidation::ArchiveInvalidation;
+use nmm_core::launch as launcher;
 use nmm_core::manager::{ImportReport, LinkMode, Manager, ModEntry, PluginRow, Staged};
 use nmm_core::nexus::{self, sso, User};
 use nmm_core::plugins::Plugin;
@@ -62,6 +63,12 @@ struct GameConfig {
     /// Folder of the game's required tool (Dark Souls 2: GeDoSaTo), `{ToolFolder}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_folder: Option<PathBuf>,
+    /// Arguments for the custom launch command (C# `CustomLaunchCommandArguments`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_args: Option<String>,
+    /// Supported tool settings key -> the folder the user picked for it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tools: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Default)]
@@ -352,22 +359,35 @@ struct GameInfo {
     /// Tool whose folder setup asks for (`GeDoSaTo`).
     required_tool: Option<String>,
     tool_folder: Option<PathBuf>,
+    launch_args: Option<String>,
+    /// Whether a custom launch command may be set.
+    allow_custom: bool,
+    /// Other games that share this one's downloads (SkyrimSE <-> SkyrimGOG).
+    shares_with: Vec<String>,
 }
 
 #[tauri::command]
 async fn games(app: AppHandle) -> Vec<GameInfo> {
     let cfg = load_config(&app);
+    let env = discover::Env::system();
     let mut v: Vec<GameInfo> = game::all()
         .into_iter()
         .map(|g| {
             let c = cfg.games.get(&g.mode_id);
             GameInfo {
-                detected: discover::detect(&g),
+                // Configured games aren't detected again (setup shows the saved path).
+                detected: c.is_none().then(|| discover::detect_in(&g, &env)).flatten(),
                 game_path: c.map(|c| c.game_path.clone()),
                 mods_dir: c.map(|c| c.mods_dir.clone()),
                 launch: c.and_then(|c| c.launch.clone()),
                 default_launch: g.default_executable().map(String::from),
                 tool_folder: c.and_then(|c| c.tool_folder.clone()),
+                launch_args: c.and_then(|c| c.launch_args.clone()),
+                allow_custom: g.allows_custom_command(),
+                shares_with: game::storage_group(&g.mode_id)
+                    .into_iter()
+                    .filter(|m| m != &g.mode_id)
+                    .collect(),
                 required_tool: g.required_tool_name.clone(),
                 mode_id: g.mode_id,
                 name: g.name,
@@ -386,6 +406,7 @@ async fn configure(
     mods_dir: Option<PathBuf>,
     launch: Option<String>,
     tool_folder: Option<PathBuf>,
+    launch_args: Option<String>,
 ) -> R<()> {
     if !game_path.is_dir() {
         return Err(format!("{} is not a folder", game_path.display()).into());
@@ -397,6 +418,12 @@ async fn configure(
     let fresh = !mods_dir.join("state.json").exists();
     tracing::info!(game = %mode, game_path = %game_path.display(), mods_dir = %mods_dir.display(), "configured");
     update_config(&app, |c| {
+        // Tool folders picked earlier survive re-running setup.
+        let tools = c
+            .games
+            .get(&mode)
+            .map(|g| g.tools.clone())
+            .unwrap_or_default();
         c.games.insert(
             mode.clone(),
             GameConfig {
@@ -404,6 +431,8 @@ async fn configure(
                 mods_dir,
                 launch: launch.filter(|l| !l.trim().is_empty()),
                 tool_folder: tool_folder.filter(|t| !t.as_os_str().is_empty()),
+                launch_args: launch_args.filter(|l| !l.trim().is_empty()),
+                tools,
             },
         );
     })?;
@@ -634,6 +663,8 @@ struct Library {
     loot: bool,
     /// Archive invalidation on/off; None for games that don't need it.
     archive_invalidation: Option<bool>,
+    /// The game ships a base-file list, so loose files can be told apart (`loose_files`).
+    has_base_files: bool,
 }
 
 #[tauri::command]
@@ -650,6 +681,7 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
         categories: categories(&m).into_iter().map(|c| (c.id, c.name)).collect(),
         nexus_checked: m.state.nexus_checked,
         uses_plugins: nmm_core::plugins::Policy::new(&m.game, &m.game_path).is_some(),
+        has_base_files: !m.game.base_files().is_empty(),
         loot: nmm_core::loot::supported(&m.game.mode_id),
         archive_invalidation: ArchiveInvalidation::new(&m.game, &m.game_path)
             .map(|a| a.is_active()),
@@ -1020,6 +1052,7 @@ enum Op {
     DeleteProfile { name: String },
     Redeploy,
     SetArchiveInvalidation { on: bool },
+    PurgeLoose,
 }
 
 /// Task: change intent and redeploy; a cancel rolls back to the previous intent.
@@ -1052,6 +1085,7 @@ fn run_op(m: &mut Manager, op: Op) -> R<()> {
         Op::SetArchiveInvalidation { on } => ArchiveInvalidation::new(&m.game, &m.game_path)
             .ok_or("this game doesn't use archive invalidation")?
             .set(on),
+        Op::PurgeLoose => m.purge_loose().map(|_| ()),
     }
 }
 
@@ -1085,33 +1119,116 @@ fn adopt(app: AppHandle, id: String, mode: String) {
     );
 }
 
+fn launch_settings(app: &AppHandle, mode: &str) -> launcher::Settings {
+    let c = load_config(app).games.get(mode).cloned();
+    launcher::Settings {
+        custom: c.as_ref().and_then(|c| c.launch.clone()),
+        custom_args: c.as_ref().and_then(|c| c.launch_args.clone()),
+        tools: c.map(|c| c.tools).unwrap_or_default(),
+    }
+}
+
+#[derive(Serialize)]
+struct LaunchOptions {
+    options: Vec<launcher::LaunchOption>,
+    /// What plain Launch runs.
+    default: String,
+}
+
 #[tauri::command]
-async fn launch(app: AppHandle, mode: String) -> R<()> {
+async fn launch_options(app: AppHandle, mode: String) -> R<LaunchOptions> {
+    blocking(move || {
+        let m = read(&app, &mode)?;
+        let env = discover::Env::system();
+        let (options, default) = launcher::options(
+            &m.game,
+            &m.game_path,
+            &launch_settings(&app, &mode),
+            &env.registry,
+        );
+        Ok(LaunchOptions { options, default })
+    })
+    .await
+}
+
+/// Start launch option `id` (default: the game's default launch), through Proton / Wine for a
+/// Windows program off Windows.
+#[tauri::command]
+async fn launch(app: AppHandle, mode: String, id: Option<String>) -> R<()> {
     // read() waits for this game's tasks, so the game never starts mid-deploy.
     let m = read(&app, &mode)?;
-    let custom = load_config(&app)
-        .games
-        .get(&mode)
-        .and_then(|c| c.launch.clone());
-    let exe = m
-        .game
-        .executable(&m.game_path, custom.as_deref())
-        .ok_or("no executable defined")?;
-    let mut cmd = if exe.extension().is_some_and(|e| e == "app") {
-        // Native mac build: LaunchServices starts the bundle.
-        let mut c = std::process::Command::new("open");
-        c.arg(&exe);
-        c
-    } else {
-        std::process::Command::new(&exe)
+    let settings = launch_settings(&app, &mode);
+    let env = discover::Env::system();
+    let (options, default) = launcher::options(&m.game, &m.game_path, &settings, &env.registry);
+    let id = id.unwrap_or(default);
+    let opt = options
+        .iter()
+        .find(|o| o.id == id)
+        .ok_or_else(|| format!("unknown launch option {id}"))?;
+    let exe = opt.exe.clone().ok_or("not found; set its folder first")?;
+    let args = match id.as_str() {
+        launcher::CUSTOM => launcher::split_args(settings.custom_args.as_deref().unwrap_or("")),
+        _ => launcher::tool(&m.game, &id)
+            .map(|t| t.args(&m.game, &m.game_path))
+            .unwrap_or_default(),
     };
-    cmd.current_dir(&m.game_path).spawn().at(&exe)?;
-    tracing::info!(game = %mode, exe = %exe.display(), "launched");
-    if load_config(&app).settings.close_on_launch {
+    let plan = launcher::plan(
+        &m.game,
+        &m.game_path,
+        &exe,
+        args,
+        id == launcher::PLAIN,
+        &env.steam_roots,
+    )?;
+    std::process::Command::new(&plan.program)
+        .args(&plan.args)
+        .envs(plan.env.iter().map(|(k, v)| (k, v)))
+        .current_dir(&plan.cwd)
+        .spawn()
+        .at(&plan.program)?;
+    tracing::info!(game = %mode, option = %id, program = %plan.program.display(), "launched");
+    if load_config(&app).settings.close_on_launch && !id.starts_with(launcher::TOOL) {
         // Through ExitRequested, so tasks on other games still roll back first.
         app.exit(0);
     }
     Ok(())
+}
+
+/// Pick the folder of supported tool `id` (`tool:LOOT`); refused when its executable isn't there.
+#[tauri::command]
+async fn tool_folder(app: AppHandle, mode: String, id: String) -> R<bool> {
+    let def = game::find(&mode).ok_or("unknown game")?;
+    let tool = launcher::tool(&def, &id).ok_or("unknown tool")?;
+    let Some(dir) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(false);
+    };
+    let dir = dir.into_path().map_err(|e| e.to_string())?;
+    if tool.in_dir(&dir).is_none() {
+        return Err(format!("{} doesn't contain {}", dir.display(), tool.name).into());
+    }
+    update_config(&app, |c| {
+        if let Some(g) = c.games.get_mut(&mode) {
+            g.tools.insert(tool.settings_key().into(), dir);
+        }
+    })?;
+    Ok(true)
+}
+
+/// Yes/No question in a native dialog.
+#[tauri::command]
+async fn ask(app: AppHandle, title: String, message: String) -> bool {
+    app.dialog()
+        .message(message)
+        .title(title)
+        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::YesNo)
+        .blocking_show()
+}
+
+/// Loose files in the game's Data folder (not base game, not ours); None when the game has no base list.
+#[tauri::command]
+async fn loose_files(app: AppHandle, mode: String) -> R<Option<Vec<String>>> {
+    blocking(move || Ok(read(&app, &mode)?.loose_files())).await
 }
 
 // ---------- downloads ----------
@@ -1179,7 +1296,8 @@ async fn download_add(app: AppHandle, mode: String, url: String) -> R<String> {
             id: String::new(),
             path: dir
                 .join("Downloads")
-                .join(&mode)
+                // One folder per storage group: SkyrimSE and SkyrimGOG share their downloads.
+                .join(&game::storage_group(&mode)[0])
                 .join(download::safe_file_name(name)),
             mode,
             domain: link.domain,
@@ -1324,6 +1442,10 @@ fn main() {
             configure,
             library,
             confirm_remove,
+            launch_options,
+            tool_folder,
+            ask,
+            loose_files,
             plugins,
             plugins_set,
             plugins_export,

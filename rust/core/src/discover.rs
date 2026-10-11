@@ -227,7 +227,7 @@ fn registry_value(_: &str, _: &str) -> Option<String> {
 }
 
 /// Library roots listed in `libraryfolders.vdf` (`"path"  "D:\\SteamLibrary"` lines).
-fn libraries(root: &Path, env: &Env) -> Vec<PathBuf> {
+pub(crate) fn libraries(root: &Path, env: &Env) -> Vec<PathBuf> {
     let mut libs = vec![root.to_path_buf()];
     for vdf in [
         "steamapps/libraryfolders.vdf",
@@ -270,7 +270,7 @@ fn tidy(p: &Path) -> PathBuf {
 }
 
 /// `%VAR%` -> its value (C# `ExpandEnvironmentVariables`); unknown ones stay as written.
-fn expand_env(s: &str) -> String {
+pub(crate) fn expand_env(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some(i) = rest.find('%') {

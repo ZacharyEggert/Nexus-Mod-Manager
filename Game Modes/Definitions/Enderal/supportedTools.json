@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "supportedTools": [
+    {
+      "id": "EnderalEdit",
+      "name": "EnderalEdit",
+      "executableName": "EnderalEdit.exe"
+    },
+    {
+      "id": "BS2",
+      "name": "BodySlide",
+      "executableNames": [
+        "BodySlide x64.exe",
+        "BodySlide.exe"
+      ],
+      "discoveryRules": [
+        {
+          "source": "GameRelative",
+          "path": "Data\\CalienteTools\\BodySlide"
+        }
+      ]
+    }
+  ]
+}

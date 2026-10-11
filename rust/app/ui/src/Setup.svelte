@@ -15,10 +15,12 @@
   let launch = $state(game.launch || '');
   // svelte-ignore state_referenced_locally
   let toolFolder = $state(game.tool_folder || '');
+  // svelte-ignore state_referenced_locally
+  let launchArgs = $state(game.launch_args || '');
 
   async function save() {
     await run('Saving settings', () =>
-      api.configure(game.mode_id, gamePath, modsDir || null, launch.trim() || null, toolFolder || null),
+      api.configure(game.mode_id, gamePath, modsDir || null, launch.trim() || null, toolFolder || null, launchArgs.trim() || null),
     );
     onsaved();
   }
@@ -34,7 +36,11 @@
     <label for="tf">{game.required_tool} folder (mods install into it)</label>
     <PathField id="tf" bind:value={toolFolder} />
   {/if}
-  <label for="lc">Launch command (in the game folder, or a full path)</label>
-  <div class="row"><input type="text" id="lc" bind:value={launch} placeholder={game.default_launch ? `Default: ${game.default_launch}` : ''} /></div>
+  {#if game.allow_custom}
+    <label for="lc">Custom launch command (in the game folder, or a full path)</label>
+    <div class="row"><input type="text" id="lc" bind:value={launch} placeholder={game.default_launch ? `Default: ${game.default_launch}` : ''} /></div>
+    <label for="la">Custom launch arguments</label>
+    <div class="row"><input type="text" id="la" bind:value={launchArgs} /></div>
+  {/if}
   <p><button class="btn primary" onclick={save}>Save</button></p>
 </div>

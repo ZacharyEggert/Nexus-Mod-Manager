@@ -19,6 +19,22 @@ export interface GameInfo {
   /** Tool whose folder setup asks for (GeDoSaTo); null when none. */
   required_tool: string | null;
   tool_folder: string | null;
+  launch_args: string | null;
+  allow_custom: boolean;
+  /** Games sharing this one's downloads. */
+  shares_with: string[];
+}
+
+export interface LaunchOption {
+  /** plain | script_extender | custom | tool:<id> */
+  id: string;
+  label: string;
+  /** null: a tool not found yet; launching it asks for its folder. */
+  exe: string | null;
+}
+export interface LaunchOptions {
+  options: LaunchOption[];
+  default: string;
 }
 
 export interface ModEntry {
@@ -77,6 +93,7 @@ export interface Library {
   loot: boolean;
   /** Archive invalidation on/off; null for games that don't need it. */
   archive_invalidation: boolean | null;
+  has_base_files: boolean;
 }
 
 export interface LootPreview {
@@ -238,13 +255,26 @@ export type Op =
   | { op: 'load_profile'; name: string }
   | { op: 'delete_profile'; name: string }
   | { op: 'redeploy' }
-  | { op: 'set_archive_invalidation'; on: boolean };
+  | { op: 'set_archive_invalidation'; on: boolean }
+  | { op: 'purge_loose' };
 
 // ---------- plain commands ----------
 
 export const games = () => invoke<GameInfo[]>('games');
-export const configure = (mode: string, gamePath: string, modsDir: string | null, launch: string | null, toolFolder: string | null) =>
-  invoke<void>('configure', { mode, gamePath, modsDir, launch, toolFolder });
+export const configure = (
+  mode: string,
+  gamePath: string,
+  modsDir: string | null,
+  launch: string | null,
+  toolFolder: string | null,
+  launchArgs: string | null,
+) => invoke<void>('configure', { mode, gamePath, modsDir, launch, toolFolder, launchArgs });
+export const launchOptions = (mode: string) => invoke<LaunchOptions>('launch_options', { mode });
+/** Pick a supported tool's folder; false when cancelled. */
+export const toolFolder = (mode: string, id: string) => invoke<boolean>('tool_folder', { mode, id });
+export const ask = (title: string, message: string) => invoke<boolean>('ask', { title, message });
+/** null when the game has no base-file list. */
+export const looseFiles = (mode: string) => invoke<string[] | null>('loose_files', { mode });
 /** Asks the mod's uninstall warning (State of Decay / X Rebirth saves), if it has one; false = keep it. */
 export const confirmRemove = (mode: string, id: string) => invoke<boolean>('confirm_remove', { mode, id });
 export const library = (mode: string) => invoke<Library>('library', { mode });
@@ -267,7 +297,8 @@ export const pickFolder = () => invoke<string | null>('pick_folder');
 export const fomodEval = (token: string, sel: Selection) => invoke<Eval>('fomod_eval', { token, sel });
 export const fomodImage = (token: string, path: string) => invoke<ArrayBuffer>('fomod_image', { token, path });
 export const fomodCancel = (token: string) => invoke<void>('fomod_cancel', { token });
-export const launch = (mode: string) => invoke<void>('launch', { mode });
+/** id: a launch option; null = the game's default launch. */
+export const launch = (mode: string, id: string | null = null) => invoke<void>('launch', { mode, id });
 export const settings = () => invoke<SettingsView>('settings');
 export const saveSettings = (settings: Settings) => invoke<void>('save_settings', { settings });
 export const nexusAccount = () => invoke<Account>('nexus_account');
