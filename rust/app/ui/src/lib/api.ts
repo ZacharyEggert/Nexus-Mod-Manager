@@ -49,6 +49,8 @@ export interface ModEntry {
   active: boolean;
   /** Omitted until known (download, or md5 match). */
   nexus?: NexusMeta;
+  /** Archive-relative readme paths kept on install; omitted when none. */
+  readmes?: string[];
 }
 
 export interface NexusMeta {
@@ -280,6 +282,8 @@ export const looseFiles = (mode: string) => invoke<string[] | null>('loose_files
 /** Asks the mod's uninstall warning (State of Decay / X Rebirth saves), if it has one; false = keep it. */
 export const confirmRemove = (mode: string, id: string) => invoke<boolean>('confirm_remove', { mode, id });
 export const library = (mode: string) => invoke<Library>('library', { mode });
+/** Text of a .txt readme; other formats open in the system app and give null. */
+export const readme = (mode: string, id: string, name: string) => invoke<string | null>('readme', { mode, id, name });
 export const plugins = (mode: string) => invoke<PluginRow[]>('plugins', { mode });
 /** Refused with the reasons when the change would break the load order. */
 export const pluginsSet = (mode: string, plugins: Plugin[]) => invoke<PluginRow[]>('plugins_set', { mode, plugins });

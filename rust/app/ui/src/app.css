@@ -42,14 +42,15 @@ label.sub { display:block; font-size:12px; cursor:pointer; }
 dialog { border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--fg); padding:0; width:min(860px, 92vw); }
 dialog::backdrop { background:#0007; }
 .wiz { display:grid; grid-template-columns:1fr 300px; min-height:420px; }
-.wiz header { grid-column:1/-1; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
+.wiz header, .readme header { grid-column:1/-1; padding:12px 16px; border-bottom:1px solid var(--line); font-weight:600; }
 .wiz .opts { padding:12px 16px; overflow:auto; max-height:60vh; }
 .wiz .opts fieldset { border:1px solid var(--line); border-radius:6px; margin:0 0 12px; }
 .wiz .opts label { display:block; padding:3px 0; cursor:pointer; }
 .wiz .opts label.off { opacity:.5; cursor:default; }
 .wiz .info { border-left:1px solid var(--line); padding:12px; overflow:auto; max-height:60vh; white-space:pre-wrap; font-size:13px; }
 .wiz .info img { max-width:100%; border-radius:6px; display:block; margin-bottom:8px; }
-.wiz footer { grid-column:1/-1; display:flex; gap:8px; justify-content:flex-end; padding:10px 16px; border-top:1px solid var(--line); }
+.readme pre { margin:0; padding:12px 16px; max-height:60vh; overflow:auto; white-space:pre-wrap; font-size:13px; }
+.wiz footer, .readme footer { grid-column:1/-1; display:flex; gap:8px; justify-content:flex-end; padding:10px 16px; border-top:1px solid var(--line); }
 button:focus-visible, select:focus-visible, input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 table.downloads td { vertical-align:top; }
 table.downloads td.actions { white-space:nowrap; text-align:right; }

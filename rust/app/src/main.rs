@@ -916,6 +916,24 @@ async fn open_nexus(app: AppHandle, domain: String, mod_id: u64, file_id: Option
         .map_err(|e| format!("open browser: {e}").into())
 }
 
+/// A mod's readme: plain text comes back to show in the app; other formats (HTML, RTF, PDF, Word)
+/// open in the system's default app (C# `OpenReadMe` opened them all that way).
+#[tauri::command]
+async fn readme(app: AppHandle, mode: String, id: String, name: String) -> R<Option<String>> {
+    let path = read(&app, &mode)?
+        .readme_path(&id, &name)
+        .ok_or("no such readme")?;
+    if name.to_lowercase().ends_with(".txt") {
+        let bytes = std::fs::read(&path).at(&path)?;
+        return Ok(Some(String::from_utf8_lossy(&bytes).into_owned()));
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|e| format!("open readme: {e}"))?;
+    Ok(None)
+}
+
 #[tauri::command]
 async fn pick_archive(app: AppHandle) -> Option<String> {
     app.dialog()
@@ -1480,7 +1498,8 @@ fn main() {
             download_resume,
             download_remove,
             nexus_check,
-            open_nexus
+            open_nexus,
+            readme
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

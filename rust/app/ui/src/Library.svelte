@@ -1,9 +1,9 @@
 <script lang="ts">
   // Installed mods for one game. Every change goes through `op`, which runs it as a task and reloads.
   import * as api from './lib/api';
-  import { LINK_MODES } from './lib/ui.svelte';
+  import { LINK_MODES, run } from './lib/ui.svelte';
 
-  let { lib, op, repair, loose }: { lib: api.Library; op: (label: string, o: api.Op) => void; repair: (adopt?: boolean) => void; loose: () => void } = $props();
+  let { mode, lib, op, repair, loose }: { mode: string; lib: api.Library; op: (label: string, o: api.Op) => void; repair: (adopt?: boolean) => void; loose: () => void } = $props();
 
   const order = $derived(Object.fromEntries(lib.mods.map((m, i) => [m.id, i])));
   const name = (id: string) => lib.mods[order[id]]?.name ?? id;
@@ -14,6 +14,17 @@
     const wins = others.filter((o) => order[o] < i).map(name);
     const loses = others.filter((o) => order[o] > i).map(name);
     return [wins.length && `overrides ${wins.join(', ')}`, loses.length && `overridden by ${loses.join(', ')}`].filter(Boolean).join('; ');
+  }
+
+  const base = (path: string) => path.slice(path.lastIndexOf('/') + 1);
+  let readme = $state<{ title: string; text: string } | null>(null);
+  let dlg: HTMLDialogElement;
+
+  async function showReadme(m: api.ModEntry, path: string) {
+    const text = await run(`Opening ${base(path)}`, () => api.readme(mode, m.id, path)).catch(() => null);
+    if (text === null) return;
+    readme = { title: `${m.name} — ${base(path)}`, text };
+    dlg.showModal();
   }
 
   const crossDrive = $derived(
@@ -89,6 +100,11 @@
                 </button>
               {/if}
             {/if}
+            {#if m.readmes?.length}
+              <div class="muted">Readme:
+                {#each m.readmes as r (r)}<button class="link" title={r} onclick={() => showReadme(m, r)}>{base(r)}</button>{/each}
+              </div>
+            {/if}
             {#if conf}<div class="conf">{conf}</div>{/if}
           </td>
           <td class="muted">
@@ -114,4 +130,13 @@
 {:else}
   <p>No mods installed yet.</p>
 {/if}
+<dialog bind:this={dlg} onclose={() => (readme = null)}>
+  {#if readme}
+    <div class="readme">
+      <header>{readme.title}</header>
+      <pre>{readme.text}</pre>
+      <footer><button class="btn" onclick={() => dlg.close()}>Close</button></footer>
+    </div>
+  {/if}
+</dialog>
 <div class="drop">Drop .zip / .7z / .rar archives here to install</div>

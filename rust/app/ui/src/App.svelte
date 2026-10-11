@@ -253,7 +253,7 @@
         {#if lib.uses_plugins && tab === 'plugins'}
           <Plugins mode={view.mode} loot={lib.loot} />
         {:else}
-          <Library {lib} {op} {repair} loose={looseFiles} />
+          <Library mode={view.mode} {lib} {op} {repair} loose={looseFiles} />
         {/if}
       {/if}
     {/if}

@@ -45,6 +45,10 @@ pub struct ModEntry {
     /// `Manifest.xml`, `content.xml`): name -> text. See `special`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub special: BTreeMap<String, String>,
+    /// Readmes kept from the archive (C# `ReadMeManager`), archive-relative paths; stored under
+    /// `ReadMe/<id>/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readmes: Vec<String>,
 }
 
 impl ModEntry {
@@ -234,6 +238,36 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
         })
         .map(|e| e.into_path())
         .collect()
+}
+
+/// C# `Readme.IsValidReadme`: a documentation extension, not `script.txt`, not a config file.
+fn is_readme(name: &str) -> bool {
+    let l = name.to_lowercase();
+    l != "script.txt"
+        && !l.contains("config")
+        && [".txt", ".rtf", ".htm", ".html", ".doc", ".docx", ".pdf"]
+            .iter()
+            .any(|e| l.ends_with(e))
+}
+
+/// Non-empty readmes of an extracted archive outside `fomod/`, `/`-separated and sorted.
+/// C# keeps only the first one it meets; this keeps all at the shallowest folder depth, so a
+/// top-level readme wins over `interface/translations/*.txt`-style data files further down.
+fn readmes(dir: &Path) -> Vec<String> {
+    let mut found: Vec<String> = files_under(dir)
+        .iter()
+        .filter(|f| f.metadata().is_ok_and(|m| m.len() > 0))
+        .map(|f| rel(f, dir))
+        .filter(|r| {
+            !r.to_lowercase().split('/').any(|s| s == "fomod")
+                && is_readme(r.rsplit('/').next().unwrap())
+        })
+        .collect();
+    let depth = |r: &String| r.matches('/').count();
+    let top = found.iter().map(depth).min().unwrap_or(0);
+    found.retain(|r| depth(r) == top);
+    found.sort_by_key(|r| r.to_lowercase());
+    found
 }
 
 /// Port of `FOMod.FindPathPrefix`: the archive folder that maps onto the install root.
@@ -533,6 +567,7 @@ impl Manager {
                 for dir in [
                     self.virtual_dir(&id),
                     self.mods_dir.join("GameRootInstall").join(&id),
+                    self.readme_dir(&id),
                 ] {
                     match fs::remove_dir_all(&dir) {
                         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -567,6 +602,38 @@ impl Manager {
 
     fn virtual_dir(&self, id: &str) -> PathBuf {
         self.mods_dir.join("VirtualInstall").join(id)
+    }
+
+    fn readme_dir(&self, id: &str) -> PathBuf {
+        self.mods_dir.join("ReadMe").join(id)
+    }
+
+    /// Copy the archive's readmes to `ReadMe/<id>/`; returns the ones kept. A failure only loses
+    /// readmes, never the install (C# `VerifyReadMeFile` swallows errors too).
+    fn keep_readmes(&self, staged: &Staged) -> Vec<String> {
+        let found = readmes(&staged.dir);
+        let dir = self.readme_dir(&staged.id);
+        found
+            .into_iter()
+            .filter(|r| {
+                let to = dir.join(r);
+                let kept = fs::create_dir_all(to.parent().unwrap())
+                    .and_then(|()| fs::copy(staged.dir.join(r), &to));
+                if let Err(e) = &kept {
+                    tracing::warn!(id = staged.id, readme = r, "keeping readme failed: {e}");
+                }
+                kept.is_ok()
+            })
+            .collect()
+    }
+
+    /// Where mod `id`'s readme `name` (one of its `readmes`) is stored.
+    pub fn readme_path(&self, id: &str, name: &str) -> Option<PathBuf> {
+        let m = self.state.mods.iter().find(|m| m.id == id)?;
+        m.readmes
+            .iter()
+            .any(|r| r == name)
+            .then(|| self.readme_dir(id).join(name))
     }
 
     pub fn install_root(&self) -> PathBuf {
@@ -805,6 +872,10 @@ impl Manager {
                 .push(dest);
                 Ok::<_, Error>(())
             });
+        let readmes = match copied {
+            Ok(()) => self.keep_readmes(&staged),
+            Err(_) => vec![],
+        };
         let _ = fs::remove_dir_all(&staged.dir);
         if let Err(e) = copied {
             if let Err(e) = self.resolve_pending() {
@@ -822,6 +893,7 @@ impl Manager {
             active: true,
             nexus: staged.nexus,
             special,
+            readmes,
         });
         self.deploy()?;
         self.resolve_pending()
@@ -1401,6 +1473,7 @@ impl Manager {
                 active: false,
                 nexus: None,
                 special: BTreeMap::new(),
+                readmes: list(self.readme_dir(id)),
             });
         }
         let report = self.scan()?;
@@ -1875,6 +1948,44 @@ mod tests {
         );
         let s = m.stage(&b).unwrap();
         assert!(s.fomod.is_some() && s.script.is_none());
+    }
+
+    #[test]
+    fn readmes_kept_on_install_dropped_on_remove() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        let mut game = crate::game::find("Fallout4").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mods = t.path().join("mods");
+        let mut m = Manager::open(game, game_path, mods.clone()).unwrap();
+
+        let a = t.path().join("Doc.zip");
+        zip(
+            &a,
+            &[
+                ("fomod/readme.txt", "installer notes"), // installer folder: skipped
+                ("Doc/ReadMe.txt", "hello"),
+                ("Doc/Guide.PDF", "%PDF"),
+                ("Doc/script.txt", "s"),         // C# known non-readme
+                ("Doc/MyConfig.txt", "c"),       // config file
+                ("Doc/empty.txt", ""),           // C# skips empty files
+                ("Doc/docs/changes.txt", "old"), // deeper than the top readmes
+                ("Doc/D.esp", "p"),
+            ],
+        );
+        let s = m.stage(&a).unwrap();
+        m.install(s, None).unwrap();
+        assert_eq!(m.state.mods[0].readmes, ["Doc/Guide.PDF", "Doc/ReadMe.txt"]);
+        let p = m.readme_path("Doc", "Doc/ReadMe.txt").unwrap();
+        assert_eq!(fs::read_to_string(p).unwrap(), "hello");
+        // Only indexed names resolve: no reading outside the mod's readme folder.
+        assert!(m.readme_path("Doc", "../../state.json").is_none());
+        assert!(m.readme_path("Nope", "Doc/ReadMe.txt").is_none());
+
+        m.remove("Doc").unwrap();
+        assert!(!mods.join("ReadMe/Doc").exists());
     }
 
     #[test]
