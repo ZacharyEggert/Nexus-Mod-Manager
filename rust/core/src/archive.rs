@@ -1,4 +1,4 @@
-//! Extract mod archives (zip / 7z / rar) into a staging folder.
+//! Extract mod archives (zip / 7z / rar / omod container) into a staging folder.
 
 use crate::{Error, IoContext, Result, Task};
 use std::path::Path;
@@ -23,6 +23,16 @@ pub fn extract(archive: &Path, dest: &Path, task: &Task) -> Result<()> {
         "zip" | "fomod" | "dazip" => extract_zip(archive, dest, task),
         "7z" => extract_7z(archive, dest, task),
         "rar" => extract_rar(archive, dest, task),
+        // OBMM wrote .omod as zip; 7z-packed ones exist too.
+        "omod" => {
+            let mut magic = [0u8; 2];
+            std::io::Read::read_exact(&mut std::fs::File::open(archive).at(archive)?, &mut magic)
+                .at(archive)?;
+            match &magic {
+                b"7z" => extract_7z(archive, dest, task),
+                _ => extract_zip(archive, dest, task),
+            }
+        }
         _ => Err(bad(archive, format!("unsupported archive type .{ext}"))),
     }
 }

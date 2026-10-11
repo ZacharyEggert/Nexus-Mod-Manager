@@ -11,6 +11,7 @@ pub mod loot;
 pub mod manager;
 pub mod modscript;
 pub mod nexus;
+pub mod omod;
 pub mod plugins;
 pub mod special;
 pub mod tools;

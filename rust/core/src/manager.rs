@@ -213,7 +213,7 @@ pub struct Staged {
     pub script: Option<String>,
     /// Nexus origin to record on the installed mod.
     pub nexus: Option<crate::nexus::updates::NexusMeta>,
-    /// `fomod/info.xml` metadata.
+    /// `fomod/info.xml` metadata, else an OMod's `config`.
     pub info: Option<fomod::Info>,
     /// The archive's `fomod/screenshot*`.
     pub screenshot: Option<PathBuf>,
@@ -786,7 +786,19 @@ impl Manager {
         }
         let dir = self.mods_dir.join(".staging").join(&id);
         let _ = fs::remove_dir_all(&dir);
+        // Only Oblivion takes OMods (C# `OblivionGameMode` formats).
+        let omod_game = self.game.mode_id == "Oblivion";
+        let is_omod = archive
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("omod"));
+        if is_omod && !omod_game {
+            return Err("OMod archives can only be installed for Oblivion".into());
+        }
+        let mut omod_info = None;
         let fomod = crate::archive::extract(archive, &dir, &self.task).and_then(|()| {
+            if omod_game {
+                omod_info = crate::omod::convert(&dir, &self.task)?;
+            }
             match fomod::locate(&dir) {
                 Some((base, cfg)) => Ok(Some((base, fomod::parse(&fs::read(&cfg).at(&cfg)?)?))),
                 None => Ok(None),
@@ -830,7 +842,9 @@ impl Manager {
         Ok(Staged {
             script: script.map(|p| rel(&p, &dir)),
             mod_script,
-            info: fomod::locate_info(&dir).and_then(|p| fomod::parse_info(&fs::read(p).ok()?)),
+            info: fomod::locate_info(&dir)
+                .and_then(|p| fomod::parse_info(&fs::read(p).ok()?))
+                .or(omod_info),
             screenshot,
             choices,
             replaces: self
@@ -4243,5 +4257,76 @@ UncheckEsp B.esp"#;
         fs::create_dir(&ini).unwrap();
         m.set_active("A", false).unwrap();
         assert!(!game_path.join("Data/textures/a.dds").exists());
+    }
+
+    #[test]
+    fn omod_stages_runs_script_and_installs() {
+        use crate::omod::tests::{config, net_str, stream};
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        fs::write(game_path.join("Data/Oblivion.esm"), "").unwrap();
+        let txt = t
+            .path()
+            .join("appdata/plugins.txt")
+            .to_string_lossy()
+            .into_owned();
+        let mut game = crate::game::find("Oblivion").unwrap();
+        let gb = game.gamebryo.as_mut().unwrap();
+        gb.user_game_data_path = Some(t.path().join("user").to_string_lossy().into());
+        gb.plugins_file_path = Some(txt.clone());
+        if let Some(p) = game.plugin.as_mut().and_then(|p| p.policy.as_mut()) {
+            p.plugins_file_path = Some(txt);
+        }
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
+
+        let (pcrc, pdata) = stream(&[("Mine.esp", b"TES4")], 0);
+        let (dcrc, ddata) = stream(&[("meshes\\a.nif", b"nif"), ("opt.txt", b"o")], 0);
+        let mut script = vec![];
+        net_str(
+            &mut script,
+            "If DialogYesNo \"Skip opt?\"\r\nDontInstallDataFile opt.txt\r\nEndIf",
+        );
+        let a = t.path().join("Packed.omod");
+        let mut z = zip::ZipWriter::new(fs::File::create(&a).unwrap());
+        for (n, b) in [
+            ("config", config("Packed Mod", 0)),
+            ("plugins.crc", pcrc),
+            ("plugins", pdata),
+            ("data.crc", dcrc),
+            ("data", ddata),
+            ("script", script),
+            ("image", b"PNG".to_vec()),
+        ] {
+            z.start_file(n, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            z.write_all(&b).unwrap();
+        }
+        z.finish().unwrap();
+
+        let mut s = m.stage(&a).unwrap();
+        assert_eq!(s.info.as_ref().unwrap().name, "Packed Mod");
+        assert!(s.screenshot.is_some() && s.fomod.is_none());
+        assert!(m.run_mod_script(&mut s, &[]).unwrap().is_some());
+        let answers = [modscript::Answer::Bool(true)];
+        assert_eq!(m.run_mod_script(&mut s, &answers).unwrap(), None);
+        m.install(s, None).unwrap();
+
+        let data = game_path.join("Data");
+        assert_eq!(fs::read(data.join("Mine.esp")).unwrap(), b"TES4");
+        assert_eq!(fs::read(data.join("meshes/a.nif")).unwrap(), b"nif");
+        assert!(!data.join("opt.txt").exists() && !data.join("fomod").exists());
+        let e = &m.state.mods[0];
+        assert_eq!(
+            (e.name.as_str(), e.screenshot.as_deref()),
+            ("Packed Mod", Some("screenshot"))
+        );
+
+        // Other games refuse .omod.
+        let mut other = crate::game::find("Fallout4").unwrap();
+        other.plugin.as_mut().unwrap().policy = None;
+        other.gamebryo = None;
+        let m2 = Manager::open(other, game_path, t.path().join("mods2")).unwrap();
+        assert!(m2.stage(&a).is_err());
     }
 }

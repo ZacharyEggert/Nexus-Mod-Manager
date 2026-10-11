@@ -2701,9 +2701,11 @@ dependencies = [
 name = "nmm-core"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "dirs 6.0.0",
  "esplugin",
  "libloot",
+ "lzma-rust2",
  "md5",
  "reqwest",
  "roxmltree",

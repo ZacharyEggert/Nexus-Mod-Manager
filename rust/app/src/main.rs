@@ -948,7 +948,10 @@ async fn screenshot(app: AppHandle, mode: String, id: String) -> R<tauri::ipc::R
 async fn pick_archive(app: AppHandle) -> Option<String> {
     app.dialog()
         .file()
-        .add_filter("Mod archives", &["zip", "7z", "rar", "fomod", "dazip"])
+        .add_filter(
+            "Mod archives",
+            &["zip", "7z", "rar", "fomod", "omod", "dazip"],
+        )
         .blocking_pick_file()
         .map(|p| p.to_string())
 }
