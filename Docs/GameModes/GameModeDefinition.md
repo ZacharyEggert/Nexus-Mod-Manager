@@ -84,7 +84,9 @@ Maps to descriptor/UI color hints such as the old per-game primary color.
 
 Maps to old `GetModFormatAdjustedPath`, `HardlinkRequiredFilesType`, `RealFileRequired`, and game-root install overrides.
 
-`pathAdjustmentProfile` selects known path-fix logic for games where mod authors often omit required folders. Current profiles are `none`, `cyberpunk2077`, `subnautica`, `stardewvalley`, `sims4`, and `nomanssky`.
+`pathAdjustmentProfile` selects known path-fix logic for games where mod authors often omit required folders. Current profiles are `none`, `cyberpunk2077`, `subnautica`, `stardewvalley`, `sims4`, and `nomanssky`. The Rust port adds `fallout4`, `starfield`, `oblivionremastered`, `baldursgate3`, `bannerlord`, `breakingwheel`, `darksouls2`, `dragonage`, `dragonsdogma`, `hogwartslegacy`, `monsterhunterworld`, `stateofdecay`, `witcher2`, `witcher3` and `xrebirth` (ported from the C# game modes).
+
+`secondaryInstallationPath` (Rust port) is where files a profile routes to the game root go instead of the game folder (Dragon Age `.dazip` content, Witcher 2 user content).
 
 `supportsGameRootInstall` enables explicit installs beside the game executable where the old Gamebryo Data-folder-only behavior is too restrictive.
 
@@ -100,6 +102,12 @@ Path placeholders supported by the runtime include:
 - `{ExecutablePath}`
 - `{ModeId}`
 - `{UserGameData}`
+
+The Rust port also expands `{ToolFolder}` (the folder of `requiredToolName`, set per game in setup), `{GameVersion}` (World of Tanks `version.xml`) and `{EsoServer}` (`live` / `liveeu`).
+
+`discovery.stores[].pathSuffix` names the game folder inside the store's folder (Dark Souls: `DATA`). `store: "Registry"` entries read `registryKey`/`registryValueName`. `plugin.policy.persistenceStrategy: "morrowindIni"` keeps active plugins in Morrowind.ini `[Game Files]`.
+
+`orderedCriticalPluginNames` (with `criticalFilesErrorMessage`) and `orderedRequiredToolFileNames` (with `requiredToolName`/`requiredToolErrorMessage`) must exist before the game can be managed.
 
 Do not use parent-directory traversal. The validator rejects paths containing `..` segments.
 

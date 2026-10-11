@@ -41,6 +41,10 @@ pub struct ModEntry {
     /// Where it came from on Nexus, once known (download, or md5 match).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nexus: Option<crate::nexus::updates::NexusMeta>,
+    /// Archive files kept for game-specific bookkeeping, not deployed (BG3 `info.json`, Dragon Age
+    /// `Manifest.xml`, `content.xml`): name -> text. See `special`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub special: BTreeMap<String, String>,
 }
 
 impl ModEntry {
@@ -110,6 +114,9 @@ pub struct State {
     /// Mode the current links were made with; a mismatch relinks everything on the next deploy.
     #[serde(default)]
     pub deployed_mode: LinkMode,
+    /// What `special::sync` added to game side files (BG3 modsettings.lsx UUIDs, AddIns.xml UIDs).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub special_applied: BTreeMap<String, Vec<String>>,
     /// Unix seconds of the last Nexus update check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nexus_checked: Option<u64>,
@@ -444,6 +451,11 @@ fn resolve_ci(base: &Path, rel: &str) -> PathBuf {
     cur
 }
 
+/// `base/rel` exists, matching each component case-insensitively; `rel` may use `\\`.
+pub(crate) fn exists_ci(base: &Path, rel: &str) -> bool {
+    resolve_ci(base, &rel.replace('\\', "/")).exists()
+}
+
 /// Remove now-empty parent dirs up to (not including) `stop`.
 fn prune(mut dir: &Path, stop: &Path) {
     while dir != stop && dir.starts_with(stop) && fs::remove_dir(dir).is_ok() {
@@ -561,7 +573,7 @@ impl Manager {
     fn place(&self, d: &Deployed) -> Place {
         let (root, backup, store) = if d.game_root {
             (
-                self.game_path.clone(),
+                self.game.secondary_root(&self.game_path),
                 self.mods_dir.join("GameRootBackup"),
                 self.mods_dir.join("GameRootInstall").join(&d.mod_id),
             )
@@ -663,18 +675,10 @@ impl Manager {
                 map.insert(key(&dest, game_root), (src, dest, game_root));
             }
         };
-        // Install-root paths go through the game's path adjustment profile first.
-        let mut put = |src: PathBuf, dest: String, game_root: bool| match game_root {
-            true => insert(src, dest, true),
-            false => match adjust::adjust(profile, &dest, &name) {
-                Some(Dest::Install(d)) => insert(src, d, false),
-                Some(Dest::GameRoot(d)) => {
-                    profile_root = true;
-                    insert(src, d, true)
-                }
-                None => {}
-            },
-        };
+        // (source, dest, game_root) before the game's path adjustment profile, which may need all of them.
+        let mut raw: Vec<(PathBuf, String, bool)> = vec![];
+        let mut put =
+            |src: PathBuf, dest: String, game_root: bool| raw.push((src, dest, game_root));
         let mut game_root = false;
         match (&staged.fomod, sel) {
             (Some((base, cfg)), Some(sel)) => {
@@ -730,6 +734,43 @@ impl Manager {
             }
         }
 
+        // Install-root paths go through the game's path adjustment profile.
+        let pre: Vec<String> = raw.iter().filter(|r| !r.2).map(|r| r.1.clone()).collect();
+        let src_of = |d: &str| raw.iter().find(|r| !r.2 && r.1 == d).map(|r| r.0.clone());
+        let content_name = match adjust::prepare(profile, &pre, &|d| fs::read(src_of(d)?).ok()) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staged.dir);
+                return Err(e.into());
+            }
+        };
+        let archive_name = staged
+            .archive
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ctx = adjust::Mod {
+            name: &name,
+            archive: &archive_name,
+            files: &pre,
+            stop_folders: &self.game.stop_folders,
+            content_name,
+        };
+        let special = crate::special::capture(&self.game, &ctx, &|d| fs::read(src_of(d)?).ok());
+        for (src, dest, game_root) in raw {
+            match game_root {
+                true => insert(src, dest, true),
+                false => match adjust::adjust(profile, &dest, &ctx) {
+                    Some(Dest::Install(d)) => insert(src, d, false),
+                    Some(Dest::GameRoot(d)) => {
+                        profile_root = true;
+                        insert(src, d, true)
+                    }
+                    None => {}
+                },
+            }
+        }
+
         let (mut files, mut root_files) = (vec![], vec![]);
         let n = map.len() as u64;
         self.mark_pending(&staged.id)?;
@@ -772,6 +813,7 @@ impl Manager {
             game_root: game_root || profile_root,
             active: true,
             nexus: staged.nexus,
+            special,
         });
         self.deploy()?;
         self.resolve_pending()
@@ -808,6 +850,11 @@ impl Manager {
         // Files of a mod the op added (or was removing) are kept or deleted per the restored list.
         self.resolve_pending()?;
         result
+    }
+
+    /// A question to ask before removing `id` (State of Decay / X Rebirth save-recorded mods).
+    pub fn removal_warning(&self, id: &str) -> Option<String> {
+        crate::special::removal_warning(self.state.mods.iter().find(|m| m.id == id)?)
     }
 
     pub fn remove(&mut self, id: &str) -> R<()> {
@@ -1081,8 +1128,18 @@ impl Manager {
     }
 
     /// Persist state after a deploy or recovery; only then is the journal obsolete.
-    fn finish(&self, added: &HashSet<String>) -> R<()> {
+    fn finish(&mut self, added: &HashSet<String>) -> R<()> {
         self.sync_plugins(added)?;
+        let mut applied = std::mem::take(&mut self.state.special_applied);
+        let store = |id: &str, f: &str| self.virtual_dir(id).join(f);
+        crate::special::sync(
+            &self.game,
+            &self.game_path,
+            &self.state.mods,
+            &store,
+            &mut applied,
+        );
+        self.state.special_applied = applied;
         self.save()?;
         match fs::remove_file(self.journal_path()) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::Io {
@@ -1253,6 +1310,7 @@ impl Manager {
                 game_root: false,
                 active: false,
                 nexus: None,
+                special: BTreeMap::new(),
             });
         }
         let report = self.scan()?;
@@ -1369,7 +1427,14 @@ impl Manager {
                 let p = self.place(d);
                 same_content(&p.src, &p.target)
             })
-            .map(|d| rel(&self.place(d).target, &self.game_path))
+            .map(|d| {
+                // Outside the game folder for managed / secondary install roots: show it whole.
+                let t = self.place(d).target;
+                match t.strip_prefix(&self.game_path) {
+                    Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                    Err(_) => t.to_string_lossy().into_owned(),
+                }
+            })
             .collect();
         let report = RepairReport {
             orphaned_backups,
@@ -2644,6 +2709,88 @@ mod tests {
         );
         assert!(!m.mods_dir.join("GameRootInstall/skse64").exists());
         assert!(!m.mods_dir.join("GameRootBackup/steam_api64.dll").exists());
+    }
+
+    #[test]
+    fn game_specific_installs() {
+        let t = tempfile::tempdir().unwrap();
+        let user = t.path().join("user");
+        let open = |mode: &str| {
+            let mut g = crate::game::find(mode).unwrap();
+            g.user_dir = Some(user.clone());
+            let game_path = t.path().join(mode);
+            fs::create_dir_all(&game_path).unwrap();
+            Manager::open(g, game_path, t.path().join(format!("mods-{mode}"))).unwrap()
+        };
+        let docs = user.join("Documents");
+
+        // Witcher 2: cook.hash mods are user content in Documents; others go to CookedPC.
+        let mut m = open("Witcher2");
+        let z = t.path().join("User.zip");
+        zip(&z, &[("Cool Mod/cook.hash", "h"), ("Cool Mod/a.dzip", "a")]);
+        m.install(m.stage(&z).unwrap(), None).unwrap();
+        let w2 = docs.join("Witcher 2/UserContent/User");
+        // The lone outer folder is the archive's wrapper: root files are named after the archive.
+        assert_eq!(fs::read_to_string(w2.join("a.dzip")).unwrap(), "a");
+        let z = t.path().join("Cooked.zip");
+        zip(&z, &[("x.dzip", "x")]);
+        m.install(m.stage(&z).unwrap(), None).unwrap();
+        assert!(m.game_path.join("CookedPC/x.dzip").exists());
+        m.remove("User").unwrap();
+        assert!(!w2.exists());
+
+        // Dragon Age .dazip: contents/ to Documents/BioWare/Dragon Age, manifest into AddIns.xml.
+        let mut m = open("DragonAge");
+        let settings = docs.join("BioWare/Dragon Age/Settings");
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(settings.join("AddIns.xml"), "<AddInsList>\n</AddInsList>\n").unwrap();
+        let z = t.path().join("Cool.dazip");
+        zip(
+            &z,
+            &[
+                ("Contents/addins/cool/core/a.erf", "e"),
+                (
+                    "Manifest.xml",
+                    "<Manifest><AddInsList><AddInItem UID=\"cool\" /></AddInsList></Manifest>",
+                ),
+            ],
+        );
+        m.install(m.stage(&z).unwrap(), None).unwrap();
+        let erf = docs.join("BioWare/Dragon Age/addins/cool/core/a.erf");
+        assert!(erf.exists());
+        assert!(!docs.join("BioWare/Dragon Age/Manifest.xml").exists());
+        let addins = || fs::read_to_string(settings.join("AddIns.xml")).unwrap();
+        assert!(addins().contains("UID=\"cool\""), "{}", addins());
+        m.set_active("Cool", false).unwrap();
+        assert!(!erf.exists() && !addins().contains("cool"));
+
+        // X Rebirth: a root content.xml names the extension folder; removal asks first.
+        let mut m = open("XRebirth");
+        let z = t.path().join("xr.zip");
+        zip(
+            &z,
+            &[
+                ("content.xml", "<content name=\"Big\" />"),
+                ("t/a.xml", "a"),
+            ],
+        );
+        m.install(m.stage(&z).unwrap(), None).unwrap();
+        assert!(m.game_path.join("extensions/Big/t/a.xml").exists());
+        assert!(m.removal_warning("xr").unwrap().contains("Big mod"));
+
+        // State of Decay: two content.xml is refused, nothing installed.
+        let mut m = open("StateOfDecay");
+        let z = t.path().join("two.zip");
+        zip(
+            &z,
+            &[
+                ("a/content.xml", "<c name=\"a\"/>"),
+                ("b/content.xml", "<c name=\"b\"/>"),
+            ],
+        );
+        let e = m.install(m.stage(&z).unwrap(), None).unwrap_err();
+        assert!(e.to_string().contains("multiple mods"), "{e}");
+        assert!(m.state.mods.is_empty());
     }
 
     #[test]

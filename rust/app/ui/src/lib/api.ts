@@ -16,6 +16,9 @@ export interface GameInfo {
   launch: string | null;
   default_launch: string | null;
   detected: string | null;
+  /** Tool whose folder setup asks for (GeDoSaTo); null when none. */
+  required_tool: string | null;
+  tool_folder: string | null;
 }
 
 export interface ModEntry {
@@ -240,8 +243,10 @@ export type Op =
 // ---------- plain commands ----------
 
 export const games = () => invoke<GameInfo[]>('games');
-export const configure = (mode: string, gamePath: string, modsDir: string | null, launch: string | null) =>
-  invoke<void>('configure', { mode, gamePath, modsDir, launch });
+export const configure = (mode: string, gamePath: string, modsDir: string | null, launch: string | null, toolFolder: string | null) =>
+  invoke<void>('configure', { mode, gamePath, modsDir, launch, toolFolder });
+/** Asks the mod's uninstall warning (State of Decay / X Rebirth saves), if it has one; false = keep it. */
+export const confirmRemove = (mode: string, id: string) => invoke<boolean>('confirm_remove', { mode, id });
 export const library = (mode: string) => invoke<Library>('library', { mode });
 export const plugins = (mode: string) => invoke<PluginRow[]>('plugins', { mode });
 /** Refused with the reasons when the change would break the load order. */

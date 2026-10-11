@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 2,
+  "modeId": "DarkSouls",
+  "name": "Dark Souls",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "DARKSOULS.exe"
+  ],
+  "stopFolders": [],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "211420",
+        "installFolderName": "Dark Souls Prepare to Die Edition",
+        "executableName": "DARKSOULS.exe",
+        "pathSuffix": "DATA"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "DARKSOULS.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch Dark Souls",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom Dark Souls",
+    "defaultCommandText": "Launch Dark Souls",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "none",
+    "supportsGameRootInstall": false,
+    "managedInstallationPath": "{GamePath}\\dsfix\\tex_override"
+  },
+  "orderedCriticalPluginNames": [
+    "DINPUT8.dll",
+    "DSfix.ini"
+  ],
+  "criticalFilesErrorMessage": "DSfix by Durante is required for Dark Souls modding, make sure it's properly installed and up to date.\nLink: https://darksouls.nexusmods.com/mods/19/\nInstall it, then restart.",
+  "compatibilityNotes": [
+    "Ported from the C# DarkSouls game mode (#24).",
+    "Game folder is DATA (where DARKSOULS.exe and DSfix live); mods go to dsfix\\tex_override."
+  ]
+}

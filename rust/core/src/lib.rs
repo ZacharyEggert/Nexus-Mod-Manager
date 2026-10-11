@@ -10,6 +10,7 @@ pub mod loot;
 pub mod manager;
 pub mod nexus;
 pub mod plugins;
+pub mod special;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "modeId": "StateOfDecay",
+  "name": "State of Decay",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "StateOfDecay.exe"
+  ],
+  "stopFolders": [],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "241540",
+        "installFolderName": "state of decay",
+        "executableName": "StateOfDecay.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "StateOfDecay.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch State of Decay",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom State of Decay",
+    "defaultCommandText": "Launch State of Decay",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#FAA740"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "stateofdecay",
+    "supportsGameRootInstall": false
+  },
+  "compatibilityNotes": [
+    "Ported from the C# StateOfDecay game mode (#24).",
+    "A content.xml that isn't one folder deep names the mod folder; readme/.url/JSGME files are skipped.",
+    "Removing a mod whose content.xml records it in saves asks first."
+  ]
+}

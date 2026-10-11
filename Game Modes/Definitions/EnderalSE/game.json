@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 2,
+  "modeId": "EnderalSE",
+  "name": "Enderal Special Edition",
+  "behaviorProfile": "gamebryo",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "Enderal Launcher.exe"
+  ],
+  "stopFolders": [
+    "textures",
+    "scripts",
+    "meshes",
+    "music",
+    "shaders",
+    "video",
+    "interface",
+    "facegen",
+    "menus",
+    "lodsettings",
+    "lsdata",
+    "sound",
+    "CalienteTools",
+    "SKSE",
+    "MWSE",
+    "NVSE",
+    "F4SE",
+    "FOSE",
+    "OBSE"
+  ],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "933480",
+        "installFolderName": "Enderal Special Edition",
+        "executableName": "Enderal Launcher.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "Enderal Launcher.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch Enderal Special Edition",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom Enderal Special Edition",
+    "defaultCommandText": "Launch Enderal Special Edition",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml",
+    "baseFilesPath": "EnderalSE_base.txt"
+  },
+  "theme": {
+    "primaryColor": "#32689E"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "none",
+    "supportsGameRootInstall": true,
+    "hardlinkRequiredExtensions": [
+      ".esp",
+      ".esl",
+      ".esm",
+      ".bsa",
+      ".mp3",
+      ".wav",
+      ".ogg",
+      ".xwm"
+    ],
+    "realFileRequiredExtensions": [
+      ".dll",
+      ".exe"
+    ]
+  },
+  "compatibilityNotes": [
+    "Ported from the C# EnderalSE game mode (#24).",
+    "C# mode id was 'enderalspecialedition'; the Nexus domain still is."
+  ],
+  "pluginExtensions": [
+    ".esm",
+    ".esl",
+    ".esp"
+  ],
+  "orderedCriticalPluginNames": [
+    "Skyrim.esm",
+    "Update.esm"
+  ],
+  "orderedOfficialPluginNames": [
+    "Enderal - Forgotten Stories.esm"
+  ],
+  "plugin": {
+    "usesPlugins": true,
+    "pluginDirectorySuffix": "Data",
+    "supportsPluginAutoSorting": false,
+    "maxAllowedActivePluginsCount": 255,
+    "policy": {
+      "schemaVersion": 1,
+      "persistenceStrategy": "singleFile",
+      "pluginsFilePath": "{LocalApplicationData}\\Enderal Special Edition\\plugins.txt",
+      "loadOrderFilePath": "{LocalApplicationData}\\Enderal Special Edition\\plugins.txt",
+      "activeMarker": "*",
+      "appDataGameFolderName": "Enderal Special Edition",
+      "useTimestampOrder": false,
+      "ignoreOfficialPlugins": true,
+      "forcedReadOnly": false,
+      "singleFileManagement": true,
+      "officialPluginsAreImplicitlyActive": true
+    }
+  },
+  "gamebryo": {
+    "scriptExtenderExecutables": [
+      "skse64_loader.exe"
+    ],
+    "requiresOptionalFilesCheckOnProfileSwitch": true,
+    "postProfileSwitchToolPath": "{GamePath}\\Data\\tools\\GenerateFNIS_for_Users\\GenerateFNISforUsers.exe",
+    "postProfileSwitchToolMessage": "It seems that FNIS is installed: switching mod profiles while using FNIS could require you to run it to prevent broken ingame animations, do you want to run it?",
+    "userGameDataPath": "{PersonalData}\\My Games\\Enderal Special Edition",
+    "iniFilePath": "{UserGameData}\\Enderal.ini",
+    "pluginsFilePath": "{LocalApplicationData}\\Enderal Special Edition\\plugins.txt",
+    "additionalSettingsFiles": {
+      "FOPrefsIniPath": "{UserGameData}\\EnderalPrefs.ini"
+    }
+  }
+}

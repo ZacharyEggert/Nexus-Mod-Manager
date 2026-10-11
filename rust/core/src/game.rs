@@ -13,24 +13,46 @@ macro_rules! games {
     };
 }
 
-// ponytail: only the 17 data-driven modes; the C#-coded ones (BG3, DarkSouls, ...) need a game.json first.
 games!(
+    "BaldursGate3",
+    "BreakingWheel",
     "Cyberpunk2077",
+    "DarkSouls",
+    "DarkSouls2",
+    "DragonAge",
+    "DragonAge2",
+    "DragonsDogma",
+    "Enderal",
+    "EnderalSE",
     "Fallout3",
     "Fallout4",
+    "Fallout4VR",
     "FalloutNV",
     "Grimrock",
+    "HogwartsLegacy",
+    "MonsterHunterWorld",
+    "Morrowind",
+    "MountAndBlade2Bannerlord",
     "NoMansSky",
     "Oblivion",
     "OblivionRemastered",
     "Skyrim",
     "SkyrimGOG",
     "SkyrimSE",
+    "SkyrimVR",
+    "Starbound",
     "Starfield",
+    "StateOfDecay",
     "Subnautica",
     "SubnauticaBelowZero",
+    "TESO",
     "TheSims4",
+    "WarThunder",
+    "Witcher2",
+    "Witcher3",
+    "WorldOfTanks",
     "XCOM2",
+    "XRebirth",
     "stardewvalley"
 );
 
@@ -61,6 +83,22 @@ pub struct GameDef {
     /// Official plugins the game loads on its own (Creation Club); also read from `.ccc` files.
     #[serde(default)]
     pub ordered_official_unmanaged_plugin_names: Vec<String>,
+    /// Files the game mode can't run without (C# refuses to open the game); relative to the plugin
+    /// folder, else the game folder.
+    pub critical_files_error_message: Option<String>,
+    /// An external tool the mods install into (Dark Souls 2: GeDoSaTo); its folder is `{ToolFolder}`.
+    pub required_tool_name: Option<String>,
+    /// Files that must exist under the tool folder.
+    #[serde(default)]
+    pub ordered_required_tool_file_names: Vec<String>,
+    pub required_tool_error_message: Option<String>,
+    /// Runtime: the user's folder for `required_tool_name`.
+    #[serde(skip)]
+    pub tool_folder: Option<PathBuf>,
+    /// Runtime: Windows user folder (`.../users/<name>`) to resolve `{PersonalData}` etc. in, instead
+    /// of this OS's or the Proton prefix's. Tests point it at a temp dir.
+    #[serde(skip)]
+    pub user_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +128,10 @@ pub struct Store {
     pub id: Option<String>,
     pub install_folder_name: Option<String>,
     pub executable_name: Option<String>,
+    /// Subfolder of the found folder that is the game folder (Dark Souls: `DATA`).
+    pub path_suffix: Option<String>,
+    pub registry_key: Option<String>,
+    pub registry_value_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +202,9 @@ pub struct ModInstallDef {
     /// Archive files beside the Data folder (script extender exe/dll) may deploy to the game root.
     #[serde(default)]
     pub supports_game_root_install: bool,
+    /// Where `Dest::GameRoot` files go instead of the game folder (C# `SecondaryInstallationPath`):
+    /// Dragon Age `.dazip` content, Witcher 2 user content.
+    pub secondary_installation_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,12 +231,17 @@ pub fn find(mode_id: &str) -> Option<GameDef> {
 
 /// Expand `{GamePath}`-style tokens and Windows separators into a native path.
 pub fn expand(template: &str, game_path: &Path) -> PathBuf {
-    expand_in(template, game_path, None)
+    expand_in(template, game_path, None, &[])
 }
 
 /// `expand`, with the Windows user folders taken from `user` (a Wine/Proton prefix's
-/// `drive_c/users/<name>`) instead of this OS's.
-fn expand_in(template: &str, game_path: &Path, user: Option<&Path>) -> PathBuf {
+/// `drive_c/users/<name>`) instead of this OS's, plus game-specific `extra` tokens.
+fn expand_in(
+    template: &str,
+    game_path: &Path,
+    user: Option<&Path>,
+    extra: &[(&str, Option<PathBuf>)],
+) -> PathBuf {
     let (local, docs) = match user {
         Some(u) => (Some(u.join("AppData/Local")), Some(u.join("Documents"))),
         None => (dirs::data_local_dir(), dirs::document_dir()),
@@ -205,7 +255,7 @@ fn expand_in(template: &str, game_path: &Path, user: Option<&Path>) -> PathBuf {
         ("{UserGameData}", None),
     ];
     let mut s = template.to_string();
-    for (t, v) in tokens {
+    for (t, v) in tokens.iter().chain(extra) {
         if let Some(v) = v {
             s = s.replace(t, &v.to_string_lossy());
         }
@@ -219,11 +269,48 @@ fn expand_in(template: &str, game_path: &Path, user: Option<&Path>) -> PathBuf {
     }
 }
 
+/// World of Tanks `res_mods/<version>`: `<version>` in `version.xml`, `\d+\.\d+\.\w+` (C# `ReadVersion`).
+fn wot_version(game_path: &Path) -> String {
+    let read = || -> Option<String> {
+        let xml = std::fs::read_to_string(game_path.join("version.xml")).ok()?;
+        let doc = roxmltree::Document::parse(&xml).ok()?;
+        let v = doc
+            .descendants()
+            .find(|n| n.has_tag_name("version"))?
+            .text()?;
+        // ponytail: hand-rolled regex \d+\.\d+\.\w+ (no regex crate).
+        let start = v.find(|c: char| c.is_ascii_digit())?;
+        let rest = &v[start..];
+        let mut parts = rest.splitn(3, '.');
+        let (a, b, c) = (parts.next()?, parts.next()?, parts.next()?);
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let word: String = c
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        (digits(a) && digits(b) && !word.is_empty()).then(|| format!("{a}.{b}.{word}"))
+    };
+    read().unwrap_or_else(|| "0.0.0.0".into())
+}
+
+/// TESO's Documents folder per server: `liveeu` for the EU client folder, else `live`.
+fn eso_server(game_path: &Path) -> &'static str {
+    let eu = game_path
+        .ancestors()
+        .filter_map(|a| a.file_name())
+        .any(|n| n.eq_ignore_ascii_case("The Elder Scrolls Online EU"));
+    if eu {
+        "liveeu"
+    } else {
+        "live"
+    }
+}
+
 impl GameDef {
     /// Folder mod files are deployed relative to (Data for gamebryo, managed path, else game root).
     pub fn install_root(&self, game_path: &Path) -> PathBuf {
         if let Some(m) = &self.mod_install.managed_installation_path {
-            return expand(m, game_path);
+            return self.path(m, game_path);
         }
         match self
             .plugin
@@ -245,6 +332,9 @@ impl GameDef {
     /// `<library>/steamapps/compatdata/<appid>/pfx/drive_c/users/steamuser`. None on Windows,
     /// for native games, or before the game's first launch created the prefix.
     pub fn windows_user_dir(&self, game_path: &Path) -> Option<PathBuf> {
+        if self.user_dir.is_some() {
+            return self.user_dir.clone();
+        }
         if cfg!(windows) {
             return None;
         }
@@ -268,11 +358,70 @@ impl GameDef {
 
     /// `expand` for this game: Windows user folders resolve inside its Proton prefix when it has one.
     pub fn path(&self, template: &str, game_path: &Path) -> PathBuf {
+        let lazy = |t: &str, f: &dyn Fn() -> PathBuf| template.contains(t).then(f);
+        let extra = [
+            ("{ToolFolder}", self.tool_folder.clone()),
+            (
+                "{GameVersion}",
+                lazy("{GameVersion}", &|| wot_version(game_path).into()),
+            ),
+            (
+                "{EsoServer}",
+                lazy("{EsoServer}", &|| eso_server(game_path).into()),
+            ),
+        ];
         expand_in(
             template,
             game_path,
             self.windows_user_dir(game_path).as_deref(),
+            &extra,
         )
+    }
+
+    /// Where game-root files deploy: `secondaryInstallationPath`, else the game folder.
+    pub fn secondary_root(&self, game_path: &Path) -> PathBuf {
+        match &self.mod_install.secondary_installation_path {
+            Some(t) => self.path(t, game_path),
+            None => game_path.to_path_buf(),
+        }
+    }
+
+    /// Why the game can't be managed yet (C# start-up checks): a missing critical file, or the
+    /// required tool's folder unset / incomplete. None when everything is there.
+    pub fn missing_files(&self, game_path: &Path) -> Option<String> {
+        if let Some(tool) = &self.required_tool_name {
+            let msg = || {
+                self.required_tool_error_message
+                    .clone()
+                    .unwrap_or_else(|| format!("Set the {tool} folder to manage this game."))
+            };
+            let Some(dir) = &self.tool_folder else {
+                return Some(msg());
+            };
+            if let Some(f) = self
+                .ordered_required_tool_file_names
+                .iter()
+                .find(|f| !expand(f, dir).exists())
+            {
+                return Some(format!(
+                    "You are missing {f} in the {tool} folder.\n{}",
+                    msg()
+                ));
+            }
+        }
+        let base = self
+            .plugin_dir(game_path)
+            .unwrap_or_else(|| game_path.to_path_buf());
+        let missing = self
+            .ordered_critical_plugin_names
+            .iter()
+            .find(|f| !crate::manager::exists_ci(&base, f))?;
+        Some(match &self.critical_files_error_message {
+            Some(m) => format!("You are missing {missing}.\n{m}"),
+            None => format!(
+                "You are missing {missing}. Please verify your game install and ensure {missing} is present."
+            ),
+        })
     }
 
     /// `{UserGameData}`-aware `path` for gamebryo settings (`{UserGameData}\Oblivion.ini`).
@@ -394,6 +543,9 @@ pub fn nexus_domain(name: &str) -> String {
         "skyrimse" | "skyrimgog" | "skyrimvr" => "skyrimspecialedition".into(),
         "falloutnv" => "newvegas".into(),
         "fallout4vr" => "fallout4".into(),
+        "enderalse" => "enderalspecialedition".into(),
+        // ponytail: C# used the mode id `teso`, which isn't a Nexus domain.
+        "teso" => "elderscrollsonline".into(),
         m => m.into(),
     }
 }
@@ -419,7 +571,7 @@ mod tests {
     #[test]
     fn all_definitions_parse() {
         let all = super::all();
-        assert_eq!(all.len(), 17);
+        assert_eq!(all.len(), 40);
         let sse = super::find("skyrimse").unwrap();
         assert!(sse.stop_folders.iter().any(|f| f == "SKSE"));
         assert_eq!(sse.active_marker(), "*");
@@ -429,10 +581,23 @@ mod tests {
         assert_eq!(super::find("FalloutNV").unwrap().nexus_domain(), "newvegas");
         assert_eq!(
             super::modes_for_domain("skyrimse"),
-            ["SkyrimGOG", "SkyrimSE"]
+            ["SkyrimGOG", "SkyrimSE", "SkyrimVR"]
         );
         assert_eq!(super::modes_for_domain("NewVegas"), ["FalloutNV"]);
-        assert!(super::modes_for_domain("morrowind").is_empty());
+        assert_eq!(super::modes_for_domain("morrowind"), ["Morrowind"]);
+        assert_eq!(
+            super::modes_for_domain("skyrimspecialedition"),
+            ["SkyrimGOG", "SkyrimSE", "SkyrimVR"]
+        );
+        assert_eq!(
+            super::find("EnderalSE").unwrap().nexus_domain(),
+            "enderalspecialedition"
+        );
+        assert_eq!(
+            super::find("TESO").unwrap().nexus_domain(),
+            "elderscrollsonline"
+        );
+        assert_eq!(super::find("Witcher3").unwrap().nexus_domain(), "witcher3");
         // Every bundled Categories.xml parses; SkyrimSE has the categories Nexus uses (42 = User Interface).
         for g in &all {
             let _ = super::default_categories(&g.mode_id);
@@ -444,6 +609,95 @@ mod tests {
             "{cats:?}"
         );
         assert!(cats.iter().all(|c| c.id != 0));
+    }
+
+    #[test]
+    fn install_roots_and_tokens() {
+        let t = tempfile::tempdir().unwrap();
+        let user = t.path().join("user");
+        let find = |m: &str| {
+            let mut g = super::find(m).unwrap();
+            g.user_dir = Some(user.clone());
+            g
+        };
+        let game = t.path().join("The Elder Scrolls Online EU");
+        assert_eq!(
+            find("TESO").install_root(&game),
+            user.join("Documents/Elder Scrolls Online/liveeu/Addons")
+        );
+        assert_eq!(
+            find("TESO").install_root(&t.path().join("The Elder Scrolls Online")),
+            user.join("Documents/Elder Scrolls Online/live/Addons")
+        );
+        let wot = t.path().join("wot");
+        std::fs::create_dir_all(&wot).unwrap();
+        assert_eq!(
+            find("WorldOfTanks").install_root(&wot),
+            wot.join("res_mods/0.0.0.0")
+        );
+        std::fs::write(
+            wot.join("version.xml"),
+            "<root><version> v.1.24.1.0 #1234</version></root>",
+        )
+        .unwrap();
+        assert_eq!(
+            find("WorldOfTanks").install_root(&wot),
+            wot.join("res_mods/1.24.1")
+        );
+        let mut ds2 = find("DarkSouls2");
+        ds2.tool_folder = Some(t.path().join("tools"));
+        assert_eq!(
+            ds2.install_root(&wot),
+            t.path().join("tools/textures/DarkSoulsII")
+        );
+        assert_eq!(
+            find("BaldursGate3").install_root(&wot),
+            user.join("AppData/Local/Larian Studios/Baldur's Gate 3/Mods")
+        );
+        assert_eq!(find("BaldursGate3").secondary_root(&wot), wot);
+        assert_eq!(
+            find("DragonAge").secondary_root(&wot),
+            user.join("Documents/BioWare/Dragon Age")
+        );
+        assert_eq!(find("Morrowind").install_root(&wot), wot.join("Data Files"));
+    }
+
+    #[test]
+    fn missing_critical_files_and_tools() {
+        let t = tempfile::tempdir().unwrap();
+        let ds = super::find("DarkSouls").unwrap();
+        let msg = ds.missing_files(t.path()).unwrap();
+        assert!(
+            msg.starts_with("You are missing DINPUT8.dll.") && msg.contains("DSfix"),
+            "{msg}"
+        );
+        std::fs::write(t.path().join("dinput8.dll"), "").unwrap();
+        std::fs::write(t.path().join("DSfix.ini"), "").unwrap();
+        assert_eq!(ds.missing_files(t.path()), None);
+
+        let mut ds2 = super::find("DarkSouls2").unwrap();
+        assert!(ds2
+            .missing_files(t.path())
+            .unwrap()
+            .contains("GeDoSaTo tool folder"));
+        ds2.tool_folder = Some(t.path().into());
+        assert!(ds2
+            .missing_files(t.path())
+            .unwrap()
+            .contains("GeDoSaTo\\GeDoSaToTool.exe"));
+        std::fs::create_dir_all(t.path().join("GeDoSaTo")).unwrap();
+        for f in ["GeDoSaToTool.exe", "GeDoSaTo.dll"] {
+            std::fs::write(t.path().join("GeDoSaTo").join(f), "").unwrap();
+        }
+        assert_eq!(ds2.missing_files(t.path()), None);
+
+        // Gamebryo masters are looked up in the plugin folder.
+        let sky = super::find("Skyrim").unwrap();
+        assert!(sky.missing_files(t.path()).unwrap().contains("Skyrim.esm"));
+        std::fs::create_dir_all(t.path().join("Data")).unwrap();
+        std::fs::write(t.path().join("Data/Skyrim.esm"), "").unwrap();
+        std::fs::write(t.path().join("Data/Update.esm"), "").unwrap();
+        assert_eq!(sky.missing_files(t.path()), None);
     }
 
     #[cfg(not(windows))]

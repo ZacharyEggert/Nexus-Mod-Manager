@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 2,
+  "modeId": "TESO",
+  "name": "The Elder Scrolls Online",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "game\\client\\eso.exe"
+  ],
+  "stopFolders": [],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "306130",
+        "installFolderName": "Zenimax Online\\The Elder Scrolls Online",
+        "executableName": "game\\client\\eso.exe"
+      },
+      {
+        "store": "Registry",
+        "registryKey": "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Zenimax_Online\\Launcher",
+        "registryValueName": "InstallPath",
+        "executableName": "game\\client\\eso.exe",
+        "pathSuffix": "The Elder Scrolls Online EU"
+      },
+      {
+        "store": "Registry",
+        "registryKey": "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\Zenimax_Online\\Launcher",
+        "registryValueName": "InstallPath",
+        "executableName": "game\\client\\eso.exe",
+        "pathSuffix": "The Elder Scrolls Online"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "game\\client\\eso.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch The Elder Scrolls Online",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom The Elder Scrolls Online",
+    "defaultCommandText": "Launch The Elder Scrolls Online",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "none",
+    "supportsGameRootInstall": false,
+    "managedInstallationPath": "{PersonalData}\\Elder Scrolls Online\\{EsoServer}\\Addons"
+  },
+  "compatibilityNotes": [
+    "Ported from the C# TESO game mode (#24).",
+    "{EsoServer} is liveeu when the game folder is 'The Elder Scrolls Online EU', else live."
+  ]
+}

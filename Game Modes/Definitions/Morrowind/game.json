@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 2,
+  "modeId": "Morrowind",
+  "name": "Morrowind",
+  "behaviorProfile": "gamebryo",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "Morrowind.exe"
+  ],
+  "stopFolders": [
+    "textures",
+    "scripts",
+    "meshes",
+    "music",
+    "shaders",
+    "video",
+    "interface",
+    "facegen",
+    "menus",
+    "lodsettings",
+    "lsdata",
+    "sound",
+    "CalienteTools",
+    "SKSE",
+    "MWSE",
+    "NVSE",
+    "F4SE",
+    "FOSE",
+    "OBSE"
+  ],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "22320",
+        "installFolderName": "Morrowind",
+        "executableName": "Morrowind.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "Morrowind.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch Morrowind",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom Morrowind",
+    "defaultCommandText": "Launch Morrowind",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml",
+    "baseFilesPath": "morrowind_base.txt"
+  },
+  "theme": {
+    "primaryColor": "#32689E"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "none",
+    "supportsGameRootInstall": true,
+    "hardlinkRequiredExtensions": [
+      ".esp",
+      ".esm",
+      ".bsa",
+      ".mp3",
+      ".wav"
+    ],
+    "realFileRequiredExtensions": [
+      ".dll",
+      ".exe"
+    ]
+  },
+  "compatibilityNotes": [
+    "Ported from the C# Morrowind game mode (#24).",
+    "Active plugins live in Morrowind.ini [Game Files] (GameFileN=); load order is file timestamps."
+  ],
+  "pluginExtensions": [
+    ".esm",
+    ".esp"
+  ],
+  "orderedCriticalPluginNames": [
+    "Morrowind.esm"
+  ],
+  "orderedOfficialPluginNames": [
+    "Tribunal.esm",
+    "Bloodmoon.esm"
+  ],
+  "plugin": {
+    "usesPlugins": true,
+    "pluginDirectorySuffix": "Data Files",
+    "supportsPluginAutoSorting": false,
+    "maxAllowedActivePluginsCount": 255,
+    "policy": {
+      "schemaVersion": 1,
+      "persistenceStrategy": "morrowindIni",
+      "pluginsFilePath": "{GamePath}\\Morrowind.ini"
+    }
+  },
+  "gamebryo": {
+    "scriptExtenderExecutables": [
+      "mwse_loader.exe"
+    ],
+    "userGameDataPath": "{GamePath}",
+    "iniFilePath": "{UserGameData}\\Morrowind.ini"
+  }
+}

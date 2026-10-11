@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 2,
+  "modeId": "XRebirth",
+  "name": "X Rebirth",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "XRebirth.exe"
+  ],
+  "stopFolders": [],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "2870",
+        "installFolderName": "X Rebirth",
+        "executableName": "XRebirth.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "XRebirth.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch X Rebirth",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom X Rebirth",
+    "defaultCommandText": "Launch X Rebirth",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "xrebirth",
+    "supportsGameRootInstall": false,
+    "managedInstallationPath": "{GamePath}\\extensions"
+  },
+  "compatibilityNotes": [
+    "Ported from the C# XRebirth game mode (#24).",
+    "A content.xml that isn't one folder deep names the mod folder.",
+    "Removing a mod whose content.xml records it in saves asks first."
+  ]
+}

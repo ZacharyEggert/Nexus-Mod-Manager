@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 2,
+  "modeId": "Witcher2",
+  "name": "The Witcher 2",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "bin\\userContentManager.exe",
+    "bin\\witcher2.exe"
+  ],
+  "stopFolders": [
+    "abilities",
+    "characters",
+    "combat",
+    "cutscenes",
+    "engine",
+    "environment",
+    "environment_levels",
+    "fx",
+    "game",
+    "globals",
+    "items",
+    "junk",
+    "levels",
+    "reactions",
+    "speedtree",
+    "templates",
+    "tests"
+  ],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "20920",
+        "installFolderName": "the witcher 2",
+        "executableName": "bin\\witcher2.exe"
+      },
+      {
+        "store": "Registry",
+        "registryKey": "HKEY_LOCAL_MACHINE\\Software\\Wow6432Node\\CD Projekt RED\\The Witcher 2",
+        "registryValueName": "InstallFolder",
+        "executableName": "bin\\witcher2.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "bin\\witcher2.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch The Witcher 2",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom The Witcher 2",
+    "defaultCommandText": "Launch The Witcher 2",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "witcher2",
+    "supportsGameRootInstall": false,
+    "managedInstallationPath": "{GamePath}\\CookedPC",
+    "secondaryInstallationPath": "{PersonalData}\\Witcher 2\\UserContent"
+  },
+  "pluginExtensions": [
+    ".dzip"
+  ],
+  "orderedCriticalPluginNames": [
+    "bin\\userContentManager.exe"
+  ],
+  "compatibilityNotes": [
+    "Ported from the C# Witcher2 game mode (#24).",
+    "Game folder is the install root (bin\\ holds the executables); mods go to CookedPC.",
+    "Mods with a cook.hash are user content and go to Documents\\Witcher 2\\UserContent."
+  ]
+}

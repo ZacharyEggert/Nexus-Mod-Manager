@@ -22,6 +22,12 @@
         "id": "1222670",
         "installFolderName": "The Sims 4",
         "executableName": "Game\\Bin\\TS4_x64.exe"
+      },
+      {
+        "store": "Registry",
+        "registryKey": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Maxis\\The Sims 4",
+        "registryValueName": "Install Dir",
+        "executableName": "Game\\Bin\\TS4_x64.exe"
       }
     ]
   },
@@ -55,6 +61,6 @@
   "compatibilityNotes": [
     "NMM installs managed content under the user's The Sims 4 document directory, not beside TS4_x64.exe.",
     "Package and TS4Script files default to Mods; Gallery households, lots and rooms are routed to Tray; .save files are routed to saves.",
-    "The Steam definition remains the only declared store because the current discovery contract does not include an EA App store type."
+    "Steam, plus the Origin/EA install registry key the C# Sims4 mode read (\"Install Dir\")."
   ]
 }

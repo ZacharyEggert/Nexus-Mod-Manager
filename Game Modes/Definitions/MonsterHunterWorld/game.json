@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 2,
+  "modeId": "MonsterHunterWorld",
+  "name": "Monster Hunter: World",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "MonsterHunterWorld.exe"
+  ],
+  "stopFolders": [
+    "nativePC"
+  ],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "582010",
+        "installFolderName": "Monster Hunter World",
+        "executableName": "MonsterHunterWorld.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "MonsterHunterWorld.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch Monster Hunter: World",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom Monster Hunter: World",
+    "defaultCommandText": "Launch Monster Hunter: World",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "monsterhunterworld",
+    "supportsGameRootInstall": false
+  },
+  "compatibilityNotes": [
+    "Ported from the C# MonsterHunterWorld game mode (#24)."
+  ]
+}

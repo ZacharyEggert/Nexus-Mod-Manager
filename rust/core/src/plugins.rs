@@ -26,9 +26,14 @@ pub enum Strategy {
     SingleFile,
     /// Plugins.txt inside the plugin folder lists the active plugins in order (Oblivion Remastered).
     PluginDirectory,
+    /// File modification times are the order; Morrowind.ini `[Game Files]` `GameFileN=` lists the
+    /// active plugins (the plugins file is the INI).
+    MorrowindIni,
 }
 
 const EXTENSIONS: &[&str] = &[".esm", ".esp", ".esl"];
+const GAME_FILES: &str = "Game Files";
+const GAME_FILE: &str = "GameFile";
 
 /// Which load-order slots an active plugin takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -260,6 +265,7 @@ impl Policy {
                 Strategy::SingleFile
             }
             Some(s) if s == "plugindirectory" => Strategy::PluginDirectory,
+            Some(s) if s == "morrowindini" => Strategy::MorrowindIni,
             // C# legacy defaults by mode id.
             _ => match game.mode_id.as_str() {
                 "Oblivion" | "Fallout3" | "FalloutNV" => Strategy::Timestamp,
@@ -388,6 +394,14 @@ impl Policy {
                 lines(&self.plugins_file),
             ),
             Strategy::SeparateFiles => (lines(&self.load_order_file), lines(&self.plugins_file)),
+            Strategy::MorrowindIni => (
+                disk.iter().map(|(n, _)| n.clone()).collect(),
+                crate::ini::numbered_in(
+                    &crate::ini::decode(&fs::read(&self.plugins_file).unwrap_or_default()),
+                    GAME_FILES,
+                    GAME_FILE,
+                ),
+            ),
             Strategy::PluginDirectory => {
                 let l = lines(&self.plugins_file);
                 (l.clone(), l)
@@ -704,6 +718,21 @@ impl Policy {
                 self.save(&self.plugins_file, "plugins.nmm.bak", &active)
             }
             Strategy::PluginDirectory => self.save(&self.plugins_file, "plugins.nmm.bak", &active),
+            Strategy::MorrowindIni => {
+                self.set_times(plugins)?;
+                let path = &self.plugins_file;
+                let old = fs::read(path).at(path)?;
+                let text = crate::ini::decode(&old);
+                let new = crate::ini::set_numbered_in(&text, GAME_FILES, GAME_FILE, &active);
+                if new != text {
+                    let bak = path.with_file_name("Morrowind.nmm.bak");
+                    if !bak.exists() {
+                        fs::copy(path, &bak).at(&bak)?;
+                    }
+                    write_durable(path, &crate::ini::encode(&new))?;
+                }
+                Ok(())
+            }
             Strategy::SingleFile => {
                 let body: Vec<String> = self
                     .header
@@ -1007,6 +1036,44 @@ pub(crate) mod tests {
             "{body}"
         );
         assert!(!body.contains("off.esp"), "{body}");
+    }
+
+    #[test]
+    fn morrowind_ini_game_files() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path();
+        let data = game_path.join("Data Files");
+        fs::create_dir_all(&data).unwrap();
+        for n in ["Morrowind.esm", "Tribunal.esm", "b.esp", "a.esp"] {
+            fs::write(data.join(n), "").unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ini = "[General]\r\nx=1\r\n[Game Files]\r\nGameFile0=Morrowind.esm\r\nGameFile1=a.esp\r\n\r\n[Archives]\r\nArchive 0=Tribunal.bsa\r\n";
+        fs::write(game_path.join("Morrowind.ini"), ini).unwrap();
+        let p = Policy::new(&crate::game::find("Morrowind").unwrap(), game_path).unwrap();
+        assert_eq!(p.strategy, Strategy::MorrowindIni);
+        let list = p.read();
+        // Timestamp order, masters first; INI says who's active.
+        assert_eq!(
+            names(&list),
+            ["*Morrowind.esm", "Tribunal.esm", "b.esp", "*a.esp"]
+        );
+        let mut list = list;
+        list[1].active = true;
+        list.swap(2, 3);
+        p.write(&list).unwrap();
+        assert_eq!(
+            read(&game_path.join("Morrowind.ini")),
+            ini.replace(
+                "GameFile1=a.esp",
+                "GameFile1=Tribunal.esm\r\nGameFile2=a.esp"
+            )
+        );
+        assert!(game_path.join("Morrowind.nmm.bak").exists());
+        assert_eq!(
+            names(&p.read()),
+            ["*Morrowind.esm", "*Tribunal.esm", "*a.esp", "b.esp"]
+        );
     }
 
     /// Minimal Skyrim SE / FO4 plugin: TES4 record with HEDR, SNAM and MAST subrecords.

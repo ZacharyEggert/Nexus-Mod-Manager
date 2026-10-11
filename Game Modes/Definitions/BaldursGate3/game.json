@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "modeId": "BaldursGate3",
+  "name": "Baldur's Gate 3",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "Launcher\\LariLauncher.exe"
+  ],
+  "stopFolders": [
+    "bin",
+    "Data"
+  ],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "1086940",
+        "installFolderName": "Baldurs Gate 3",
+        "executableName": "Launcher\\LariLauncher.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "Launcher\\LariLauncher.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch Baldur's Gate 3",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom Baldur's Gate 3",
+    "defaultCommandText": "Launch Baldur's Gate 3",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#D1AB5E"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "baldursgate3",
+    "supportsGameRootInstall": false,
+    "managedInstallationPath": "{LocalApplicationData}\\Larian Studios\\Baldur's Gate 3\\Mods",
+    "realFileRequiredExtensions": [
+      ".exe",
+      ".jar",
+      ".dll",
+      ".gr2"
+    ]
+  },
+  "compatibilityNotes": [
+    "Ported from the C# BaldursGate3 game mode (#24).",
+    "Mods (.pak) install to the Larian Mods folder; files under bin/ or Data/ go to the game folder.",
+    "info.json is not deployed: its mods are added to every PlayerProfiles/*/modsettings.lsx (except 'default') while the mod is active."
+  ]
+}

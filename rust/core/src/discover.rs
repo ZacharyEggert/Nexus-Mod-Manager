@@ -31,14 +31,25 @@ fn libraries(root: &Path) -> Vec<PathBuf> {
     libs
 }
 
+/// A definition's relative Windows path (`Zenimax Online\\The Elder Scrolls Online`) as a native one.
+fn native(rel: &str) -> PathBuf {
+    rel.split(['\\', '/']).filter(|c| !c.is_empty()).collect()
+}
+
 // ponytail: Steam only; GOG/Epic/Xbox need registry or manifest probing, add when users ask.
 pub fn detect(game: &GameDef) -> Option<PathBuf> {
-    let folders: Vec<&str> = game
+    let folders: Vec<PathBuf> = game
         .discovery
         .stores
         .iter()
         .filter(|s| s.store == "Steam")
-        .filter_map(|s| s.install_folder_name.as_deref())
+        .filter_map(|s| {
+            let f = native(s.install_folder_name.as_deref()?);
+            Some(match &s.path_suffix {
+                Some(x) => f.join(native(x)),
+                None => f,
+            })
+        })
         .collect();
     steam_roots()
         .iter()

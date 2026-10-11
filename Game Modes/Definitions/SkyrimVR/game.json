@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 2,
+  "modeId": "SkyrimVR",
+  "name": "Skyrim VR",
+  "behaviorProfile": "gamebryo",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "SkyrimVR.exe"
+  ],
+  "stopFolders": [
+    "textures",
+    "scripts",
+    "meshes",
+    "music",
+    "shaders",
+    "video",
+    "interface",
+    "facegen",
+    "menus",
+    "lodsettings",
+    "lsdata",
+    "sound",
+    "CalienteTools",
+    "SKSE",
+    "MWSE",
+    "NVSE",
+    "F4SE",
+    "FOSE",
+    "OBSE",
+    "Nemesis_Engine",
+    "Pandora_Engine"
+  ],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "611670",
+        "installFolderName": "SkyrimVR",
+        "executableName": "SkyrimVR.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "SkyrimVR.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch Skyrim VR",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom Skyrim VR",
+    "defaultCommandText": "Launch Skyrim VR",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml",
+    "baseFilesPath": "skyrimvr_base.txt"
+  },
+  "theme": {
+    "primaryColor": "#32689E"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "none",
+    "supportsGameRootInstall": true,
+    "hardlinkRequiredExtensions": [
+      ".esp",
+      ".esl",
+      ".esm",
+      ".bsa",
+      ".mp3",
+      ".wav",
+      ".ogg",
+      ".xwm"
+    ],
+    "realFileRequiredExtensions": [
+      ".dll",
+      ".exe"
+    ]
+  },
+  "compatibilityNotes": [
+    "Ported from the C# SkyrimVR game mode (#24)."
+  ],
+  "pluginExtensions": [
+    ".esm",
+    ".esl",
+    ".esp"
+  ],
+  "orderedCriticalPluginNames": [
+    "Skyrim.esm",
+    "Update.esm",
+    "Dawnguard.esm",
+    "HearthFires.esm",
+    "Dragonborn.esm",
+    "SkyrimVR.esm"
+  ],
+  "plugin": {
+    "usesPlugins": true,
+    "pluginDirectorySuffix": "Data",
+    "supportsPluginAutoSorting": false,
+    "maxAllowedActivePluginsCount": 255,
+    "policy": {
+      "schemaVersion": 1,
+      "persistenceStrategy": "singleFile",
+      "pluginsFilePath": "{LocalApplicationData}\\Skyrim VR\\plugins.txt",
+      "loadOrderFilePath": "{LocalApplicationData}\\Skyrim VR\\plugins.txt",
+      "activeMarker": "*",
+      "appDataGameFolderName": "Skyrim VR",
+      "useTimestampOrder": false,
+      "ignoreOfficialPlugins": true,
+      "forcedReadOnly": false,
+      "singleFileManagement": true,
+      "officialPluginsAreImplicitlyActive": true
+    }
+  },
+  "gamebryo": {
+    "scriptExtenderExecutables": [
+      "sksevr_loader.exe"
+    ],
+    "requiresOptionalFilesCheckOnProfileSwitch": true,
+    "postProfileSwitchToolPath": "{GamePath}\\Data\\tools\\GenerateFNIS_for_Users\\GenerateFNISforUsers.exe",
+    "postProfileSwitchToolMessage": "It seems that FNIS is installed: switching mod profiles while using FNIS could require you to run it to prevent broken ingame animations, do you want to run it?",
+    "userGameDataPath": "{PersonalData}\\My Games\\Skyrim VR",
+    "iniFilePath": "{UserGameData}\\SkyrimVR.ini",
+    "rendererFilePath": "{UserGameData}\\RendererInfo.txt",
+    "pluginsFilePath": "{LocalApplicationData}\\Skyrim VR\\plugins.txt",
+    "additionalSettingsFiles": {
+      "FOPrefsIniPath": "{UserGameData}\\SkyrimPrefs.ini"
+    }
+  }
+}

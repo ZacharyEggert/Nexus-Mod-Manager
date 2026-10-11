@@ -59,6 +59,9 @@ struct GameConfig {
     /// Custom launch command (e.g. SMAPI); `None` = the definition's executable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     launch: Option<String>,
+    /// Folder of the game's required tool (Dark Souls 2: GeDoSaTo), `{ToolFolder}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_folder: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -303,13 +306,23 @@ fn default_mods_dir(app: &AppHandle, mode: &str) -> R<PathBuf> {
 }
 
 /// Open a game's manager. Callers that write must hold the game's lock (i.e. run inside `spawn`).
+/// Refused while the game misses a critical file or its required tool (C# start-up check).
 fn manager(app: &AppHandle, mode: &str) -> R<Manager> {
-    let def = game::find(mode).ok_or("unknown game")?;
+    let m = open_manager(app, mode)?;
+    match m.game.missing_files(&m.game_path) {
+        Some(why) => Err(why.into()),
+        None => Ok(m),
+    }
+}
+
+fn open_manager(app: &AppHandle, mode: &str) -> R<Manager> {
+    let mut def = game::find(mode).ok_or("unknown game")?;
     let cfg = load_config(app)
         .games
         .get(mode)
         .cloned()
         .ok_or("game path not set")?;
+    def.tool_folder = cfg.tool_folder;
     Manager::open(def, cfg.game_path, cfg.mods_dir)
 }
 
@@ -331,6 +344,9 @@ struct GameInfo {
     /// What Launch runs when `launch` is unset.
     default_launch: Option<String>,
     detected: Option<PathBuf>,
+    /// Tool whose folder setup asks for (`GeDoSaTo`).
+    required_tool: Option<String>,
+    tool_folder: Option<PathBuf>,
 }
 
 #[tauri::command]
@@ -346,6 +362,8 @@ async fn games(app: AppHandle) -> Vec<GameInfo> {
                 mods_dir: c.map(|c| c.mods_dir.clone()),
                 launch: c.and_then(|c| c.launch.clone()),
                 default_launch: g.default_executable().map(String::from),
+                tool_folder: c.and_then(|c| c.tool_folder.clone()),
+                required_tool: g.required_tool_name.clone(),
                 mode_id: g.mode_id,
                 name: g.name,
             }
@@ -362,6 +380,7 @@ async fn configure(
     game_path: PathBuf,
     mods_dir: Option<PathBuf>,
     launch: Option<String>,
+    tool_folder: Option<PathBuf>,
 ) -> R<()> {
     if !game_path.is_dir() {
         return Err(format!("{} is not a folder", game_path.display()).into());
@@ -379,12 +398,15 @@ async fn configure(
                 game_path,
                 mods_dir,
                 launch: launch.filter(|l| !l.trim().is_empty()),
+                tool_folder: tool_folder.filter(|t| !t.as_os_str().is_empty()),
             },
         );
     })?;
     if fresh {
         // A new mods folder starts with the default link mode; nothing is deployed yet, so no relink.
-        let mut m = read(&app, &mode)?;
+        let lock = app.state::<App>().lock(&mode);
+        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = open_manager(&app, &mode)?;
         m.state.link_mode = load_config(&app).settings.link_mode;
         m.state.deployed_mode = m.state.link_mode;
         m.save()?;
@@ -630,6 +652,21 @@ async fn library(app: AppHandle, mode: String) -> R<Library> {
     })
 }
 
+/// Whether to go on uninstalling `id`: asks the mod's warning (C# `CheckSecondaryUninstall`), if any.
+#[tauri::command]
+async fn confirm_remove(app: AppHandle, mode: String, id: String) -> R<bool> {
+    let Some(warning) = read(&app, &mode)?.removal_warning(&id) else {
+        return Ok(true);
+    };
+    Ok(app
+        .dialog()
+        .message(warning)
+        .title("Warning")
+        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+        .buttons(tauri_plugin_dialog::MessageDialogButtons::YesNo)
+        .blocking_show())
+}
+
 // ---------- plugins ----------
 
 #[tauri::command]
@@ -846,7 +883,7 @@ async fn open_nexus(app: AppHandle, domain: String, mod_id: u64, file_id: Option
 async fn pick_archive(app: AppHandle) -> Option<String> {
     app.dialog()
         .file()
-        .add_filter("Mod archives", &["zip", "7z", "rar", "fomod"])
+        .add_filter("Mod archives", &["zip", "7z", "rar", "fomod", "dazip"])
         .blocking_pick_file()
         .map(|p| p.to_string())
 }
@@ -1276,6 +1313,7 @@ fn main() {
             games,
             configure,
             library,
+            confirm_remove,
             plugins,
             plugins_set,
             plugins_export,

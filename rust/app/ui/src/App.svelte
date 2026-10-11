@@ -50,6 +50,7 @@
 
   async function op(label: string, o: api.Op) {
     if (view.kind !== 'game') return;
+    if (o.op === 'remove' && !(await api.confirmRemove(view.mode, o.id).catch(() => true))) return;
     await runTask(label, api.apply(view.mode, o)).catch(() => {});
     reload();
   }

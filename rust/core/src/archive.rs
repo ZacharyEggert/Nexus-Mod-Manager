@@ -19,7 +19,8 @@ pub fn extract(archive: &Path, dest: &Path, task: &Task) -> Result<()> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "zip" | "fomod" => extract_zip(archive, dest, task),
+        // .dazip: Dragon Age's zip package.
+        "zip" | "fomod" | "dazip" => extract_zip(archive, dest, task),
         "7z" => extract_7z(archive, dest, task),
         "rar" => extract_rar(archive, dest, task),
         _ => Err(bad(archive, format!("unsupported archive type .{ext}"))),

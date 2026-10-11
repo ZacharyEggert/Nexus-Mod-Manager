@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 2,
+  "modeId": "WarThunder",
+  "name": "War Thunder",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "aces.exe"
+  ],
+  "stopFolders": [],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "236930",
+        "installFolderName": "War Thunder",
+        "executableName": "aces.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "aces.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch War Thunder",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom War Thunder",
+    "defaultCommandText": "Launch War Thunder",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "none",
+    "supportsGameRootInstall": false,
+    "managedInstallationPath": "{GamePath}\\UserSkins"
+  },
+  "compatibilityNotes": [
+    "Ported from the C# WarThunder game mode (#24)."
+  ]
+}

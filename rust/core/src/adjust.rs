@@ -11,14 +11,118 @@ use serde::{Deserialize, Serialize};
 pub enum Profile {
     #[default]
     None,
+    BaldursGate3,
+    Bannerlord,
+    BreakingWheel,
     Cyberpunk2077,
+    DarkSouls2,
+    DragonAge,
+    DragonsDogma,
     Fallout4,
+    HogwartsLegacy,
+    MonsterHunterWorld,
     NoMansSky,
     OblivionRemastered,
     Sims4,
     StardewValley,
     Starfield,
+    StateOfDecay,
     Subnautica,
+    Witcher2,
+    Witcher3,
+    XRebirth,
+}
+
+/// What a path rule may need to know about the whole mod (C# rules read the `IMod`).
+#[derive(Debug, Default, Clone)]
+pub struct Mod<'a> {
+    pub name: &'a str,
+    /// Archive file name (`Mod.dazip`).
+    pub archive: &'a str,
+    /// Every file the mod installs, before adjustment, in archive order.
+    pub files: &'a [String],
+    pub stop_folders: &'a [String],
+    /// `content.xml`'s root `name` when the mod's files go under it (State of Decay, X Rebirth).
+    pub content_name: Option<String>,
+}
+
+impl Mod<'_> {
+    fn archive_stem(&self) -> &str {
+        let n = file_name(self.archive);
+        n.rfind('.').map_or(n, |i| &n[..i])
+    }
+
+    fn archive_is(&self, e: &str) -> bool {
+        ext(self.archive) == e
+    }
+}
+
+/// Per-mod checks before any file is adjusted, as the C# rules threw mid-install. Returns the
+/// `content.xml` folder name to put in `Mod::content_name`. `read` gets a file's bytes by path.
+pub fn prepare(
+    profile: Profile,
+    files: &[String],
+    read: &dyn Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Option<String>, String> {
+    if !matches!(profile, Profile::StateOfDecay | Profile::XRebirth) {
+        return Ok(None);
+    }
+    const MULTI: &str = "This package contains multiple mods, which is not supported.";
+    let contents: Vec<&String> = files.iter().filter(|f| f.contains("content.xml")).collect();
+    let name = match (profile, contents.as_slice()) {
+        (Profile::StateOfDecay, []) => None,
+        (Profile::XRebirth, []) => {
+            return Err("Mod package does not include a content.xml file.".into())
+        }
+        (_, [one]) => {
+            let nest = one.split('/').count();
+            if nest == 1 || nest > 2 {
+                Some(content_name(&read(one).unwrap_or_default())?)
+            } else {
+                None
+            }
+        }
+        _ => return Err(MULTI.into()),
+    };
+    if profile == Profile::StateOfDecay && name.is_none() {
+        let bad = files.iter().find(|f| {
+            let l = f.to_lowercase();
+            sod_keep(f)
+                && f.contains('/')
+                && !["game", "engine", "user"].iter().any(|r| l.starts_with(r))
+        });
+        if bad.is_some() {
+            return Err("This package does not meet the layout standards for State of Decay mods, which is not supported.".into());
+        }
+    }
+    Ok(name)
+}
+
+fn content_name(xml: &[u8]) -> Result<String, String> {
+    let bad = || "The attribute 'name' is set improperly in the file 'content.xml'.".to_string();
+    let text = String::from_utf8_lossy(xml);
+    let doc = roxmltree::Document::parse(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("content.xml: {e}"))?;
+    doc.root_element()
+        .attribute("name")
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .ok_or_else(bad)
+}
+
+/// State of Decay skips docs and package metadata (C# `validPathForModifications`).
+fn sod_keep(p: &str) -> bool {
+    let l = p.to_lowercase();
+    !(p.contains("content.xml")
+        || p.contains("components.xml")
+        || ["readme", "read me", ".url", "jsgme"]
+            .iter()
+            .any(|s| l.contains(s)))
+}
+
+fn starts_ci(p: &str, prefix: &str) -> bool {
+    p.get(..prefix.len())
+        .is_some_and(|h| h.eq_ignore_ascii_case(prefix))
 }
 
 #[derive(Debug, PartialEq)]
@@ -59,11 +163,62 @@ fn depth(path: &str) -> usize {
     path.matches('/').count()
 }
 
-pub fn adjust(profile: Profile, path: &str, mod_name: &str) -> Option<Dest> {
+pub fn adjust(profile: Profile, path: &str, m: &Mod) -> Option<Dest> {
     let p = path.replace('\\', "/");
     let p = p.trim_start_matches('/');
+    let mod_name = m.name;
     let install = |s: String| Some(Dest::Install(s));
+    let named = |s: &str| match &m.content_name {
+        Some(n) => format!("{n}/{s}"),
+        None => s.into(),
+    };
     match profile {
+        Profile::BaldursGate3 => baldurs_gate3(p),
+        Profile::Bannerlord => install(if p.starts_with("Modules") {
+            p.into()
+        } else {
+            format!("Modules/{p}")
+        }),
+        Profile::BreakingWheel => install(if starts_ci(p, "Content") {
+            format!("Main Game/Ellie_Ball_Project/{p}")
+        } else {
+            format!("Main Game/Ellie_Ball_Project/Content/{p}")
+        }),
+        Profile::DarkSouls2 => dark_souls2(p).map(Dest::Install),
+        Profile::DragonAge => dragon_age(p, m),
+        // C# `Contains`: a stop folder name anywhere in the path, case-sensitive.
+        Profile::DragonsDogma => m
+            .stop_folders
+            .iter()
+            .any(|s| p.contains(s.as_str()))
+            .then(|| Dest::Install(p.into())),
+        Profile::HogwartsLegacy => {
+            let p = if p.starts_with("mods") {
+                format!("~{p}")
+            } else {
+                p.into()
+            };
+            install(if p.starts_with("~mods") {
+                p
+            } else {
+                format!("~mods/{p}")
+            })
+        }
+        Profile::MonsterHunterWorld => {
+            let loader = ["dtdata.dll", "loader.dll", "loader-config.json"].contains(&p);
+            install(if starts_ci(p, "nativePC") || loader {
+                p.into()
+            } else {
+                format!("nativePC/{p}")
+            })
+        }
+        Profile::StateOfDecay => match &m.content_name {
+            Some(_) => install(named(p)),
+            None => sod_keep(p).then(|| Dest::Install(p.into())),
+        },
+        Profile::XRebirth => install(named(p)),
+        Profile::Witcher2 => Some(witcher2(p, m)),
+        Profile::Witcher3 => witcher3(p, mod_name).map(Dest::Install),
         Profile::None => install(p.into()),
         Profile::Fallout4 => install(strip_data(&fallout4(p))),
         Profile::Starfield => install(strip_data(&starfield(p))),
@@ -78,6 +233,104 @@ pub fn adjust(profile: Profile, path: &str, mod_name: &str) -> Option<Dest> {
         Profile::NoMansSky => no_mans_sky(p, mod_name).map(Dest::Install),
         Profile::Cyberpunk2077 => install(cyberpunk(p)),
     }
+}
+
+/// `info.json` feeds modsettings.lsx instead of deploying; `bin/` and `Data/` trees go to the game folder.
+fn baldurs_gate3(p: &str) -> Option<Dest> {
+    if file_name(p).eq_ignore_ascii_case("info.json") {
+        return None;
+    }
+    let l = p.to_lowercase();
+    let game = ["bin/", "data/"]
+        .iter()
+        .any(|d| l.starts_with(d) || l.contains(&format!("/{d}")));
+    Some(if game {
+        Dest::GameRoot(p.into())
+    } else {
+        Dest::Install(p.into())
+    })
+}
+
+/// GeDoSaTo's `textures/DarkSoulsII/override`; C# `Substring`s, case-sensitive.
+fn dark_souls2(p: &str) -> Option<String> {
+    let out = if p.starts_with("DarkSoulsII") {
+        p.get(12..).unwrap_or("").into()
+    } else if p.starts_with("textures") {
+        p.get(21..).unwrap_or("").into()
+    } else if !p.contains("override") {
+        format!("override/{p}")
+    } else {
+        p.into()
+    };
+    (!out.is_empty()).then_some(out)
+}
+
+/// `.dazip` content goes to Documents/BioWare/Dragon Age (secondary root), `contents/` stripped;
+/// its Manifest.xml is read for AddIns.xml, not deployed. Loose root files get a mod-named folder.
+fn dragon_age(p: &str, m: &Mod) -> Option<Dest> {
+    let dazip = m.archive_is(".dazip");
+    let mut s = String::new();
+    if dazip {
+        if file_name(p).eq_ignore_ascii_case("manifest.xml") {
+            return None;
+        }
+        if starts_ci(p, "contents") {
+            s = p.get(9..).unwrap_or("").into();
+        }
+    }
+    if s.is_empty() {
+        s = if depth(p) == 0 {
+            m.archive_stem().into()
+        } else {
+            p.into()
+        };
+    }
+    let out = if depth(p) == 0 { format!("{s}/{p}") } else { s };
+    Some(if dazip {
+        Dest::GameRoot(out)
+    } else {
+        Dest::Install(out)
+    })
+}
+
+/// Mods with a `cook.hash` are user content (secondary root, Documents/Witcher 2/UserContent):
+/// root files go in a folder named after the first file's folder (or the archive), spaces dropped.
+fn witcher2(p: &str, m: &Mod) -> Dest {
+    if !m.files.iter().any(|f| f.contains("cook.hash")) {
+        return Dest::Install(p.into());
+    }
+    if depth(p) > 0 {
+        return Dest::GameRoot(p.into());
+    }
+    let dir = m
+        .files
+        .first()
+        .and_then(|f| f.rsplit_once('/'))
+        .map_or(m.archive_stem(), |(d, _)| d)
+        .replace(' ', "");
+    Dest::GameRoot(format!("{dir}/{p}"))
+}
+
+/// `content/` trees become `Mods/mod<Name>/content`, `mod*` / `DLC*` folders go under `Mods/` /
+/// `DLC/`, checked as-is then without the outer folder. Anything else isn't installed.
+/// C# put loose `content/` in `<game>/mod<Name>` (outside `Mods`, where the game never looks).
+fn witcher3(p: &str, mod_name: &str) -> Option<String> {
+    let clean: String = mod_name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || "_.-".contains(*c))
+        .collect();
+    let candidates = [Some(p), p.split_once('/').map(|(_, rest)| rest)];
+    candidates.into_iter().flatten().find_map(|c| {
+        if starts_ci(c, "content") {
+            Some(format!("Mods/mod{clean}/{c}"))
+        } else if c.starts_with("mod") {
+            Some(format!("Mods/{c}"))
+        } else if c.starts_with("DLC") {
+            Some(format!("DLC/{c}"))
+        } else {
+            None
+        }
+    })
 }
 
 /// Port of `MakePluginDirectoryRelative` for the `Data` plugin dir.
@@ -323,11 +576,21 @@ fn cyberpunk(p: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{adjust, Dest::*, Profile::*};
+    use super::{adjust, prepare, Dest::*, Mod, Profile::*};
 
     #[test]
     fn profiles() {
-        let a = |pr, p| adjust(pr, p, "My Mod!");
+        let a = |pr, p: &str| {
+            adjust(
+                pr,
+                p,
+                &Mod {
+                    name: "My Mod!",
+                    files: &[p.to_string()],
+                    ..Mod::default()
+                },
+            )
+        };
         let i = |s: &str| Some(Install(s.into()));
         let g = |s: &str| Some(GameRoot(s.into()));
 
@@ -413,5 +676,138 @@ mod tests {
             a(Cyberpunk2077, "dispatcher.archive"),
             i("archive/pc/mod/dispatcher.archive")
         );
+
+        assert_eq!(a(BaldursGate3, "Foo/info.json"), Option::None);
+        assert_eq!(a(BaldursGate3, "Foo.pak"), i("Foo.pak"));
+        assert_eq!(a(BaldursGate3, "bin/x.dll"), g("bin/x.dll"));
+        assert_eq!(a(BaldursGate3, "Wrap/Data/x.lsx"), g("Wrap/Data/x.lsx"));
+
+        assert_eq!(a(Bannerlord, "Modules/X/a.xml"), i("Modules/X/a.xml"));
+        assert_eq!(a(Bannerlord, "X/a.xml"), i("Modules/X/a.xml"));
+
+        assert_eq!(
+            a(BreakingWheel, "content/a.pak"),
+            i("Main Game/Ellie_Ball_Project/content/a.pak")
+        );
+        assert_eq!(
+            a(BreakingWheel, "a.pak"),
+            i("Main Game/Ellie_Ball_Project/Content/a.pak")
+        );
+
+        assert_eq!(
+            a(DarkSouls2, "DarkSoulsII/override/a.dds"),
+            i("override/a.dds")
+        );
+        assert_eq!(
+            a(DarkSouls2, "textures/DarkSoulsII/override/a.dds"),
+            i("override/a.dds")
+        );
+        assert_eq!(a(DarkSouls2, "a.dds"), i("override/a.dds"));
+
+        assert_eq!(a(HogwartsLegacy, "mods/a.pak"), i("~mods/a.pak"));
+        assert_eq!(a(HogwartsLegacy, "a.pak"), i("~mods/a.pak"));
+        assert_eq!(a(HogwartsLegacy, "~mods/a.pak"), i("~mods/a.pak"));
+
+        assert_eq!(a(MonsterHunterWorld, "loader.dll"), i("loader.dll"));
+        assert_eq!(a(MonsterHunterWorld, "NativePC/a"), i("NativePC/a"));
+        assert_eq!(a(MonsterHunterWorld, "pl/a"), i("nativePC/pl/a"));
+
+        assert_eq!(
+            a(Witcher3, "content/a.bundle"),
+            i("Mods/modMyMod/content/a.bundle")
+        );
+        assert_eq!(a(Witcher3, "Wrap/modX/content/a"), i("Mods/modX/content/a"));
+        assert_eq!(a(Witcher3, "DLC1/a"), i("DLC/DLC1/a"));
+        assert_eq!(a(Witcher3, "readme.txt"), Option::None);
+    }
+
+    #[test]
+    fn whole_mod_rules() {
+        let files = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let i = |s: &str| Some(Install(s.into()));
+        let g = |s: &str| Some(GameRoot(s.into()));
+
+        // Dragon's Dogma: only paths naming a stop folder install.
+        let stop = files(&["rom", "sound"]);
+        let dd = Mod {
+            stop_folders: &stop,
+            ..Mod::default()
+        };
+        assert_eq!(adjust(DragonsDogma, "rom/a.arc", &dd), i("rom/a.arc"));
+        assert_eq!(adjust(DragonsDogma, "readme.txt", &dd), Option::None);
+
+        // Dragon Age: .dazip contents go to the secondary root, the manifest is held back.
+        let dazip = Mod {
+            archive: "Cool.dazip",
+            ..Mod::default()
+        };
+        assert_eq!(adjust(DragonAge, "Manifest.xml", &dazip), Option::None);
+        assert_eq!(
+            adjust(DragonAge, "Contents/addins/x/a.erf", &dazip),
+            g("addins/x/a.erf")
+        );
+        let plain = Mod {
+            archive: "Cool.zip",
+            ..Mod::default()
+        };
+        assert_eq!(adjust(DragonAge, "a.erf", &plain), i("Cool/a.erf"));
+        assert_eq!(adjust(DragonAge, "sub/a.erf", &plain), i("sub/a.erf"));
+
+        // Witcher 2: a cook.hash makes it user content, root files under the first file's folder.
+        let w2 = files(&["My Mod/cook.hash", "My Mod/a.dzip", "b.dzip"]);
+        let user = Mod {
+            files: &w2,
+            archive: "x.7z",
+            ..Mod::default()
+        };
+        assert_eq!(adjust(Witcher2, "My Mod/a.dzip", &user), g("My Mod/a.dzip"));
+        assert_eq!(adjust(Witcher2, "b.dzip", &user), g("MyMod/b.dzip"));
+        let cooked = files(&["a.dzip"]);
+        let base = Mod {
+            files: &cooked,
+            ..Mod::default()
+        };
+        assert_eq!(adjust(Witcher2, "a.dzip", &base), i("a.dzip"));
+
+        // content.xml: a root one names the mod folder; one folder deep stays as is.
+        let read = |_: &str| Some(br#"<content name="Cool Mod" save="true"/>"#.to_vec());
+        let root = files(&["content.xml", "ext/a.cat"]);
+        assert_eq!(prepare(XRebirth, &root, &read), Ok(Some("Cool Mod".into())));
+        let nested = files(&["Cool/content.xml", "Cool/a.cat"]);
+        assert_eq!(prepare(XRebirth, &nested, &read), Ok(Option::None));
+        assert!(prepare(XRebirth, &files(&["a.cat"]), &read).is_err());
+        let two = files(&["a/content.xml", "b/content.xml"]);
+        assert!(prepare(StateOfDecay, &two, &read)
+            .unwrap_err()
+            .contains("multiple mods"));
+        let named = Mod {
+            content_name: Some("Cool Mod".into()),
+            ..Mod::default()
+        };
+        assert_eq!(
+            adjust(XRebirth, "ext/a.cat", &named),
+            i("Cool Mod/ext/a.cat")
+        );
+        assert_eq!(
+            adjust(StateOfDecay, "readme.txt", &named),
+            i("Cool Mod/readme.txt")
+        );
+
+        // State of Decay without content.xml: docs skipped, other folders must be game/engine/user.
+        let sod = files(&["game/a.pak", "ReadMe.txt"]);
+        assert_eq!(prepare(StateOfDecay, &sod, &read), Ok(Option::None));
+        assert_eq!(
+            adjust(StateOfDecay, "ReadMe.txt", &Mod::default()),
+            Option::None
+        );
+        assert_eq!(
+            adjust(StateOfDecay, "game/a.pak", &Mod::default()),
+            i("game/a.pak")
+        );
+        assert!(prepare(StateOfDecay, &files(&["mods/a.pak"]), &read).is_err());
+        let bad = |_: &str| Some(b"<content/>".to_vec());
+        assert!(prepare(XRebirth, &root, &bad)
+            .unwrap_err()
+            .contains("'name'"));
     }
 }

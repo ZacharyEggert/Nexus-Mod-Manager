@@ -1,0 +1,60 @@
+{
+  "schemaVersion": 2,
+  "modeId": "Witcher3",
+  "name": "The Witcher 3",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "bin\\x64\\Witcher3.exe"
+  ],
+  "stopFolders": [],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "292030",
+        "installFolderName": "The Witcher 3",
+        "executableName": "bin\\x64\\Witcher3.exe"
+      },
+      {
+        "store": "GOG",
+        "id": "1423049311",
+        "executableName": "bin\\x64\\Witcher3.exe",
+        "registryKey": "HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\GOG.com\\Games\\1423049311",
+        "registryValueName": "PATH"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "bin\\x64\\Witcher3.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch The Witcher 3",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom The Witcher 3",
+    "defaultCommandText": "Launch The Witcher 3",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "witcher3",
+    "supportsGameRootInstall": false
+  },
+  "compatibilityNotes": [
+    "Ported from the C# Witcher3 game mode (#24).",
+    "content\\ trees become Mods\\mod<Name>\\content; mod*/DLC* folders go under Mods\\ / DLC\\; anything else is skipped."
+  ]
+}

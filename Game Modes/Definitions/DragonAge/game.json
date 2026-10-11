@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 2,
+  "modeId": "DragonAge",
+  "name": "Dragon Age",
+  "behaviorProfile": "generic",
+  "legacyFallback": false,
+  "gameExecutables": [
+    "daorigins.exe"
+  ],
+  "stopFolders": [],
+  "supportedFormats": [
+    "fomod"
+  ],
+  "discovery": {
+    "stores": [
+      {
+        "store": "Steam",
+        "id": "17450",
+        "installFolderName": "dragon age origins",
+        "executableName": "daorigins.exe"
+      }
+    ]
+  },
+  "launcher": {
+    "defaultExecutable": "daorigins.exe",
+    "plainCommandName": "PlainLaunch",
+    "plainCommandText": "Launch Dragon Age",
+    "customCommandName": "CustomLaunch",
+    "customCommandText": "Launch Custom Dragon Age",
+    "defaultCommandText": "Launch Dragon Age",
+    "allowCustomCommand": true
+  },
+  "resources": {
+    "categoriesPath": "Categories.xml"
+  },
+  "theme": {
+    "primaryColor": "#502D17"
+  },
+  "setup": {
+    "useGenericSetup": true
+  },
+  "settings": {
+    "useGenericSettings": true
+  },
+  "modInstall": {
+    "pathAdjustmentProfile": "dragonage",
+    "supportsGameRootInstall": false,
+    "managedInstallationPath": "{PersonalData}\\BioWare\\Dragon Age\\Packages\\Core\\Override",
+    "secondaryInstallationPath": "{PersonalData}\\BioWare\\Dragon Age"
+  },
+  "compatibilityNotes": [
+    "Ported from the C# DragonAge game mode (#24).",
+    ".dazip mods install their contents\\ into Documents\\BioWare\\Dragon Age and register Manifest.xml AddInItems in Settings\\AddIns.xml.",
+    "chargenmorphcfg.xml from active mods is merged into Override\\NMM_chargenmorphcfg\\chargenmorphcfg.xml."
+  ]
+}
