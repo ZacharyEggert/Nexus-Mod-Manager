@@ -27,6 +27,89 @@ pub struct Env {
     pub legendary: Vec<PathBuf>,
     /// Lutris game config folders (`*.yml`).
     pub lutris: Vec<PathBuf>,
+    /// Wine prefixes / bottles (CrossOver, Whisky, Bottles, `~/.wine`), each searched like a
+    /// Windows install of its own.
+    pub wine_prefixes: Vec<PathBuf>,
+    /// Set while searching inside a prefix: Windows paths (`C:\...`) map into it.
+    pub prefix: Option<PathBuf>,
+}
+
+impl Env {
+    /// A path a store reported, on this machine: `X:\...` inside `prefix` when searching a bottle.
+    fn host_path(&self, raw: &str) -> PathBuf {
+        let Some(prefix) = &self.prefix else {
+            return PathBuf::from(raw);
+        };
+        let b = raw.as_bytes();
+        if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+            let drive = (b[0] as char).to_ascii_lowercase();
+            let base = if drive == 'c' {
+                prefix.join("drive_c")
+            } else {
+                prefix.join("dosdevices").join(format!("{drive}:"))
+            };
+            return base.join(native(&raw[2..]));
+        }
+        PathBuf::from(raw)
+    }
+
+    /// The same sources, inside the Wine prefix `p`: its Steam, registry files and Epic manifests.
+    fn in_prefix(p: &Path) -> Self {
+        let c = p.join("drive_c");
+        let prefix = p.to_path_buf();
+        let reg_prefix = prefix.clone();
+        Self {
+            steam_roots: ["Program Files (x86)/Steam", "Program Files/Steam"]
+                .iter()
+                .map(|r| c.join(r))
+                .filter(|r| r.is_dir())
+                .collect(),
+            registry: Box::new(move |k, v| wine_registry(&reg_prefix, k, v)),
+            epic_manifests: Some(c.join("ProgramData/Epic/EpicGamesLauncher/Data/Manifests")),
+            xbox_roots: vec![],
+            heroic: vec![],
+            legendary: vec![],
+            lutris: vec![],
+            wine_prefixes: vec![],
+            prefix: Some(prefix),
+        }
+    }
+}
+
+/// A value from a Wine prefix's registry files (`system.reg` = HKLM, `user.reg` = HKCU).
+fn wine_registry(prefix: &Path, key: &str, value: &str) -> Option<String> {
+    let (hive, path) = key.split_once('\\')?;
+    let file = match hive.to_ascii_uppercase().as_str() {
+        "HKEY_LOCAL_MACHINE" | "HKLM" => "system.reg",
+        "HKEY_CURRENT_USER" | "HKCU" => "user.reg",
+        _ => return None,
+    };
+    let text = crate::ini::decode(&std::fs::read(prefix.join(file)).ok()?);
+    let unescape = |s: &str| s.replace("\\\\", "\\");
+    let mut inside = false;
+    for line in text.lines() {
+        if let Some(sec) = line.strip_prefix('[') {
+            let name = sec.rsplit_once(']').map_or(sec, |(n, _)| n);
+            inside = unescape(name).eq_ignore_ascii_case(path);
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if !k.trim_matches('"').eq_ignore_ascii_case(value) {
+            continue;
+        }
+        if let Some(d) = v.strip_prefix("dword:") {
+            return u32::from_str_radix(d.trim(), 16)
+                .ok()
+                .map(|n| n.to_string());
+        }
+        return Some(unescape(v.trim().trim_matches('"')));
+    }
+    None
 }
 
 impl Env {
@@ -72,6 +155,26 @@ impl Env {
         for v in [&mut heroic, &mut legendary, &mut lutris] {
             v.retain(|p| p.is_dir());
         }
+        let mut wine_prefixes = vec![];
+        if let Some(h) = dirs::home_dir() {
+            wine_prefixes.push(h.join(".wine"));
+            for bottles in [
+                h.join("Library/Application Support/CrossOver/Bottles"),
+                h.join("Library/Containers/com.isaacmarovitz.Whisky/Bottles"),
+                h.join(".local/share/bottles/bottles"),
+                h.join(".var/app/com.usebottles.bottles/data/bottles/bottles"),
+            ] {
+                let mut found: Vec<PathBuf> = std::fs::read_dir(bottles)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .collect();
+                found.sort();
+                wine_prefixes.extend(found);
+            }
+        }
+        wine_prefixes.retain(|p| p.join("drive_c").is_dir());
         let program_data = std::env::var_os("ProgramData").map(PathBuf::from);
         let mut xbox_roots = vec![];
         if cfg!(windows) {
@@ -93,6 +196,8 @@ impl Env {
             heroic,
             legendary,
             lutris,
+            wine_prefixes,
+            prefix: None,
         }
     }
 }
@@ -122,7 +227,7 @@ fn registry_value(_: &str, _: &str) -> Option<String> {
 }
 
 /// Library roots listed in `libraryfolders.vdf` (`"path"  "D:\\SteamLibrary"` lines).
-fn libraries(root: &Path) -> Vec<PathBuf> {
+fn libraries(root: &Path, env: &Env) -> Vec<PathBuf> {
     let mut libs = vec![root.to_path_buf()];
     for vdf in [
         "steamapps/libraryfolders.vdf",
@@ -132,7 +237,7 @@ fn libraries(root: &Path) -> Vec<PathBuf> {
             for line in vdf.lines() {
                 let parts: Vec<&str> = line.split('"').collect();
                 if parts.len() >= 4 && parts[1] == "path" {
-                    let p = PathBuf::from(parts[3].replace("\\\\", "\\"));
+                    let p = env.host_path(&parts[3].replace("\\\\", "\\"));
                     if !libs.contains(&p) {
                         libs.push(p);
                     }
@@ -194,19 +299,23 @@ fn expand_env(s: &str) -> String {
 
 /// C# `ValidatePath`: env vars, `pathSuffix`, folder exists, the executable is in it. A native
 /// mac/Linux build counts when it ships the executable without `.exe`.
-fn validate(path: &str, s: &Store) -> Option<PathBuf> {
+fn validate(path: &str, s: &Store, env: &Env) -> Option<PathBuf> {
     let path = path.trim();
     if path.is_empty() {
         return None;
     }
-    let mut p = PathBuf::from(expand_env(path));
+    let mut p = env.host_path(&expand_env(path));
     if let Some(x) = &s.path_suffix {
         p = tidy(&p.join(native(x)));
     }
     if !p.is_dir() {
         return None;
     }
-    if let Some(exe) = &s.executable_name {
+    // Off Windows a Steam folder is the game's own (exact install folder name), and native
+    // mac/Linux builds ship differently named binaries or an .app bundle.
+    let trust_folder =
+        !cfg!(windows) && env.prefix.is_none() && s.store.eq_ignore_ascii_case("steam");
+    if let Some(exe) = s.executable_name.as_ref().filter(|_| !trust_folder) {
         let native_exe = exe
             .strip_suffix(".exe")
             .or_else(|| exe.strip_suffix(".EXE"))
@@ -225,11 +334,12 @@ fn steam(s: &Store, env: &Env) -> Option<PathBuf> {
     let in_library = env
         .steam_roots
         .iter()
-        .flat_map(|r| libraries(r))
+        .flat_map(|r| libraries(r, env))
         .find_map(|lib| {
             validate(
                 &lib.join("steamapps/common").join(&folder).to_string_lossy(),
                 s,
+                env,
             )
         });
     in_library.or_else(|| {
@@ -238,7 +348,7 @@ fn steam(s: &Store, env: &Env) -> Option<PathBuf> {
         let key = format!(
             r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Steam App {id}"
         );
-        validate(&(env.registry)(&key, "InstallLocation")?, s)
+        validate(&(env.registry)(&key, "InstallLocation")?, s, env)
     })
 }
 
@@ -394,14 +504,14 @@ fn gog(s: &Store, env: &Env) -> Option<PathBuf> {
         heroic_gog(env)
             .into_iter()
             .find(|(a, _)| a == id)
-            .and_then(|(_, p)| validate(&p, s))
+            .and_then(|(_, p)| validate(&p, s, env))
     });
     if heroic.is_some() {
         return heroic;
     }
     let value = s.registry_value_name.as_deref().unwrap_or("PATH");
     if let Some(k) = &s.registry_key {
-        return validate(&(env.registry)(k, value)?, s);
+        return validate(&(env.registry)(k, value)?, s, env);
     }
     let id = s.id.as_deref()?;
     [
@@ -410,7 +520,7 @@ fn gog(s: &Store, env: &Env) -> Option<PathBuf> {
         format!(r"HKEY_CURRENT_USER\SOFTWARE\GOG.com\Games\{id}"),
     ]
     .iter()
-    .find_map(|k| validate(&(env.registry)(k, value)?, s))
+    .find_map(|k| validate(&(env.registry)(k, value)?, s, env))
 }
 
 fn registry(s: &Store, env: &Env) -> Option<PathBuf> {
@@ -418,7 +528,7 @@ fn registry(s: &Store, env: &Env) -> Option<PathBuf> {
         .registry_value_name
         .as_deref()
         .unwrap_or("InstallLocation");
-    validate(&(env.registry)(s.registry_key.as_deref()?, value)?, s)
+    validate(&(env.registry)(s.registry_key.as_deref()?, value)?, s, env)
 }
 
 fn epic(s: &Store, env: &Env) -> Option<PathBuf> {
@@ -432,7 +542,9 @@ fn epic(s: &Store, env: &Env) -> Option<PathBuf> {
                 .install_folder_name
                 .as_deref()
                 .is_some_and(|n| title.eq_ignore_ascii_case(n));
-            (by_id || by_name).then(|| validate(&path, s)).flatten()
+            (by_id || by_name)
+                .then(|| validate(&path, s, env))
+                .flatten()
         });
     if legendary.is_some() {
         return legendary;
@@ -461,7 +573,7 @@ fn epic(s: &Store, env: &Env) -> Option<PathBuf> {
             .as_deref()
             .is_some_and(|n| field("DisplayName").is_some_and(|d| d.eq_ignore_ascii_case(n)));
         (by_id || by_name)
-            .then(|| validate(field("InstallLocation")?, s))
+            .then(|| validate(field("InstallLocation")?, s, env))
             .flatten()
     })
 }
@@ -472,7 +584,7 @@ fn xbox(s: &Store, env: &Env) -> Option<PathBuf> {
             .registry_value_name
             .as_deref()
             .unwrap_or("InstallLocation");
-        if let Some(p) = (env.registry)(k, value).and_then(|p| validate(&p, s)) {
+        if let Some(p) = (env.registry)(k, value).and_then(|p| validate(&p, s, env)) {
             return Some(p);
         }
     }
@@ -523,7 +635,9 @@ fn xbox(s: &Store, env: &Env) -> Option<PathBuf> {
                 cands.push(d.join("Content"));
             }
         }
-        cands.iter().find_map(|c| validate(&c.to_string_lossy(), s))
+        cands
+            .iter()
+            .find_map(|c| validate(&c.to_string_lossy(), s, env))
     })
 }
 
@@ -531,19 +645,26 @@ pub fn detect(game: &GameDef) -> Option<PathBuf> {
     detect_in(game, &Env::system())
 }
 
+/// This machine's stores, then Lutris, then each Wine prefix's own.
 pub fn detect_in(game: &GameDef, env: &Env) -> Option<PathBuf> {
-    game.discovery
-        .stores
-        .iter()
-        .find_map(|s| match s.store.to_ascii_lowercase().as_str() {
-            "steam" => steam(s, env),
-            "gog" => gog(s, env),
-            "epic" => epic(s, env),
-            "xbox" => xbox(s, env),
-            "registry" => registry(s, env),
-            _ => None,
-        })
-        .or_else(|| lutris(game, env))
+    let stores = |env: &Env| {
+        game.discovery
+            .stores
+            .iter()
+            .find_map(|s| match s.store.to_ascii_lowercase().as_str() {
+                "steam" => steam(s, env),
+                "gog" => gog(s, env),
+                "epic" => epic(s, env),
+                "xbox" => xbox(s, env),
+                "registry" => registry(s, env),
+                _ => None,
+            })
+    };
+    stores(env).or_else(|| lutris(game, env)).or_else(|| {
+        env.wine_prefixes
+            .iter()
+            .find_map(|p| stores(&Env::in_prefix(p)))
+    })
 }
 
 #[cfg(test)]
@@ -565,6 +686,8 @@ mod tests {
             heroic: vec![],
             legendary: vec![],
             lutris: vec![],
+            wine_prefixes: vec![],
+            prefix: None,
         }
     }
 
@@ -597,11 +720,11 @@ mod tests {
         let mut e = env(&[]);
         e.steam_roots = vec![root.clone()];
         let ds = crate::game::find("DarkSouls").unwrap();
-        // Folder without the executable: not a hit.
-        fs::create_dir_all(lib.join("steamapps/common/Dark Souls Prepare to Die Edition/DATA"))
-            .unwrap();
-        assert_eq!(detect_in(&ds, &e), None);
+        // Folder without the executable: not a hit on Windows; elsewhere Steam's folder is trusted
+        // (native builds name their binaries differently).
         let data = lib.join("steamapps/common/Dark Souls Prepare to Die Edition/DATA");
+        fs::create_dir_all(&data).unwrap();
+        assert_eq!(detect_in(&ds, &e), (!cfg!(windows)).then(|| data.clone()));
         touch(&data.join("DARKSOULS.exe"));
         assert_eq!(detect_in(&ds, &e), Some(data));
         // Backslash folder names (TESO) and native builds without .exe.
@@ -736,6 +859,65 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wine_bottles() {
+        let t = tempfile::tempdir().unwrap();
+        // CrossOver-style bottle with Steam for Windows and a second library on D:.
+        let bottle = t.path().join("Bottles/Steam");
+        let c = bottle.join("drive_c");
+        let steam = c.join("Program Files (x86)/Steam");
+        fs::create_dir_all(steam.join("steamapps")).unwrap();
+        fs::write(
+            steam.join("steamapps/libraryfolders.vdf"),
+            "\"libraryfolders\"\n{\n\t\"1\"\n\t{\n\t\t\"path\"\t\t\"D:\\\\SteamLibrary\"\n\t}\n}\n",
+        )
+        .unwrap();
+        let d = t.path().join("ext");
+        fs::create_dir_all(bottle.join("dosdevices")).unwrap();
+        std::os::unix::fs::symlink(&d, bottle.join("dosdevices/d:")).unwrap();
+        let sse = d.join("SteamLibrary/steamapps/common/Skyrim Special Edition");
+        touch(&sse.join("SkyrimSE.exe"));
+        fs::create_dir_all(c.join("users/crossover")).unwrap();
+        let mut e = env(&[]);
+        e.wine_prefixes = vec![bottle.clone()];
+        let sky = crate::game::find("SkyrimSE").unwrap();
+        let found = detect_in(&sky, &e).unwrap();
+        assert_eq!(
+            found,
+            bottle.join("dosdevices/d:/SteamLibrary/steamapps/common/Skyrim Special Edition")
+        );
+        // In a bottle the executable must be there (Windows rules).
+        fs::remove_file(sse.join("SkyrimSE.exe")).unwrap();
+        assert_eq!(detect_in(&sky, &e), None);
+
+        // GOG Galaxy in a bottle: its system.reg holds the key, C:\ maps to drive_c.
+        let gog_dir = c.join("GOG Games/Stardew Valley");
+        touch(&gog_dir.join("Stardew Valley.exe"));
+        fs::write(
+            bottle.join("system.reg"),
+            "WINE REGISTRY Version 2\n\n[Software\\\\Wow6432Node\\\\GOG.com\\\\Games\\\\1453375253] 1700000000\n#time=1d\n\"PATH\"=\"C:\\\\GOG Games\\\\Stardew Valley\"\n\"x\"=dword:0000000a\n",
+        )
+        .unwrap();
+        assert_eq!(
+            wine_registry(
+                &bottle,
+                r"HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\GOG.com\Games\1453375253",
+                "x"
+            )
+            .as_deref(),
+            Some("10")
+        );
+        let sdv = crate::game::find("stardewvalley").unwrap();
+        let found = detect_in(&sdv, &e).unwrap();
+        assert_eq!(found, gog_dir);
+        // Its settings live in the bottle's user folder.
+        assert_eq!(
+            sdv.windows_user_dir(&found),
+            Some(c.join("users/crossover"))
+        );
     }
 
     #[test]

@@ -1097,10 +1097,15 @@ async fn launch(app: AppHandle, mode: String) -> R<()> {
         .game
         .executable(&m.game_path, custom.as_deref())
         .ok_or("no executable defined")?;
-    std::process::Command::new(&exe)
-        .current_dir(&m.game_path)
-        .spawn()
-        .at(&exe)?;
+    let mut cmd = if exe.extension().is_some_and(|e| e == "app") {
+        // Native mac build: LaunchServices starts the bundle.
+        let mut c = std::process::Command::new("open");
+        c.arg(&exe);
+        c
+    } else {
+        std::process::Command::new(&exe)
+    };
+    cmd.current_dir(&m.game_path).spawn().at(&exe)?;
     tracing::info!(game = %mode, exe = %exe.display(), "launched");
     if load_config(&app).settings.close_on_launch {
         // Through ExitRequested, so tasks on other games still roll back first.

@@ -269,6 +269,18 @@ fn expand_in(
     }
 }
 
+/// The first `.app` bundle in `dir` (by name).
+fn app_bundle(dir: &Path) -> Option<PathBuf> {
+    let mut apps: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("app")))
+        .collect();
+    apps.sort();
+    apps.into_iter().next()
+}
+
 /// A Wine prefix's user folder: `steamuser` (Proton), else `$USER`, else the only other one
 /// besides `Public`.
 pub fn prefix_user(prefix: &Path) -> Option<PathBuf> {
@@ -528,6 +540,12 @@ impl GameDef {
             if native.exists() {
                 return Some(native);
             }
+            // Native mac build: the game folder holds an .app bundle instead (launched via `open`).
+            if cfg!(target_os = "macos") && custom.is_none() {
+                if let Some(app) = app_bundle(game_path) {
+                    return Some(app);
+                }
+            }
         }
         Some(exe)
     }
@@ -744,5 +762,14 @@ mod tests {
         std::fs::write(dir.path().join("StardewModdingAPI"), "").unwrap();
         let smapi = sdv.executable(dir.path(), Some("StardewModdingAPI.exe"));
         assert_eq!(smapi.unwrap(), dir.path().join("StardewModdingAPI"));
+        // macOS: an .app bundle stands in for the missing executable.
+        let sb = super::find("Starbound").unwrap();
+        std::fs::create_dir_all(dir.path().join("Starbound.app/Contents/MacOS")).unwrap();
+        let want = if cfg!(target_os = "macos") {
+            dir.path().join("Starbound.app")
+        } else {
+            dir.path().join("win32/starbound.exe")
+        };
+        assert_eq!(sb.executable(dir.path(), None).unwrap(), want);
     }
 }
