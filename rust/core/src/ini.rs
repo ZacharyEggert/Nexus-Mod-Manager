@@ -3,7 +3,8 @@
 //! of its section, or adds the section). Bytes outside the edited line are kept as they were.
 
 use crate::{write_durable, IoContext, Result};
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// INI files are ANSI; Latin-1 round-trips every byte.
 pub(crate) fn decode(bytes: &[u8]) -> String {
@@ -153,6 +154,122 @@ pub(crate) fn set_numbered_in(text: &str, section: &str, prefix: &str, values: &
     out.join(nl) + nl
 }
 
+/// `text` without `section`'s `key` line (`WritePrivateProfileString` with a null value).
+pub fn remove_in(text: &str, section: &str, key: &str) -> String {
+    let nl = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut inside = false;
+    let mut found = false;
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            if let Some(s) = section_of(line) {
+                inside = s.eq_ignore_ascii_case(section);
+            } else if !found && inside && key_of(line).is_some_and(|k| k.eq_ignore_ascii_case(key))
+            {
+                found = true;
+                return false;
+            }
+            true
+        })
+        .collect();
+    if found {
+        lines.join(nl) + nl
+    } else {
+        text.to_string()
+    }
+}
+
+/// Set (`Some`) or remove (`None`) a key; a missing file is created on set, as Windows does.
+pub fn put(path: &Path, section: &str, key: &str, value: Option<&str>) -> Result<()> {
+    let text = match std::fs::read(path) {
+        Ok(b) => decode(&b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && value.is_some() => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).at(path),
+    };
+    let new = match value {
+        Some(v) => set_in(&text, section, key, v),
+        None => remove_in(&text, section, key),
+    };
+    if new != text || !path.exists() {
+        write_durable(path, &encode(&new))?;
+    }
+    Ok(())
+}
+
+/// One INI key edited by mods: C# `IniEdit` with its install-log owner stack, plus the values
+/// `IniEdits.xml` kept to re-apply them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Edit {
+    /// Resolved path (inside the Wine/Proton prefix when the game keeps its INIs there).
+    pub file: PathBuf,
+    pub section: String,
+    pub key: String,
+    /// Value before the first mod edited it; None when the key was absent.
+    pub original: Option<String>,
+    /// (mod id, value), first editor first. The last active editor's value is live.
+    pub by: Vec<(String, String)>,
+    /// What `sync_edits` last left in the file.
+    pub applied: Option<String>,
+}
+
+/// Record mod `id` setting `key` (C# `IniInstaller.EditIni`). A mod editing a key again replaces
+/// its value where it stands in the stack (C# `IniUpgradeInstaller`).
+pub(crate) fn record(
+    edits: &mut Vec<Edit>,
+    id: &str,
+    file: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+) {
+    let i = match edits.iter().position(|e| {
+        e.file == file && e.section.eq_ignore_ascii_case(section) && e.key.eq_ignore_ascii_case(key)
+    }) {
+        Some(i) => i,
+        None => {
+            let original = get(file, section, key);
+            edits.push(Edit {
+                file: file.into(),
+                section: section.into(),
+                key: key.into(),
+                applied: original.clone(),
+                original,
+                by: vec![],
+            });
+            edits.len() - 1
+        }
+    };
+    let by = &mut edits[i].by;
+    match by.iter_mut().find(|(m, _)| m == id) {
+        Some(e) => e.1 = value.into(),
+        None => by.push((id.into(), value.into())),
+    }
+}
+
+/// Bring the files in line with `edits`: each key holds its last active editor's value, else its
+/// original (absent = removed), C# `UneditIni`. `active` is None for mods no longer installed,
+/// whose edits are dropped; a key nobody edits any more is forgotten once restored. Only changes
+/// since the last sync are written, so hand edits stick until the key's owner changes.
+/// Best effort: a failed write is logged and retried next time.
+pub(crate) fn sync_edits(edits: &mut Vec<Edit>, active: impl Fn(&str) -> Option<bool>) {
+    for e in edits.iter_mut() {
+        e.by.retain(|(id, _)| active(id).is_some());
+        let want = match e.by.iter().rev().find(|(id, _)| active(id) == Some(true)) {
+            Some((_, v)) => Some(v.clone()),
+            None => e.original.clone(),
+        };
+        if want == e.applied {
+            continue;
+        }
+        match put(&e.file, &e.section, &e.key, want.as_deref()) {
+            Ok(()) => e.applied = want,
+            Err(err) => tracing::warn!(file = %e.file.display(), "INI edit not applied: {err}"),
+        }
+    }
+    edits.retain(|e| !e.by.is_empty() || e.applied != e.original);
+}
+
 pub fn get(path: &Path, section: &str, key: &str) -> Option<String> {
     get_in(&decode(&std::fs::read(path).ok()?), section, key)
 }
@@ -232,5 +349,16 @@ mod tests {
             b"[A]\r\nname=caf\xe9\r\nk=1\r\n"
         );
         assert_eq!(get(&p, "a", "NAME").as_deref(), Some("caf\u{e9}"));
+        // Removing a key keeps the rest; a missing file is created on write, untouched on remove.
+        assert_eq!(
+            remove_in(text, "archive", "SARCHIVELIST"),
+            text.replace("SArchiveList = a.bsa, b.bsa\r\n", "")
+        );
+        assert_eq!(remove_in(text, "Display", "nope"), text);
+        let new = t.path().join("new.ini");
+        put(&new, "A", "k", None).unwrap();
+        assert!(!new.exists());
+        put(&new, "A", "k", Some("1")).unwrap();
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "[A]\nk=1\n");
     }
 }

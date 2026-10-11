@@ -121,6 +121,9 @@ pub struct State {
     /// What `special::sync` added to game side files (BG3 modsettings.lsx UUIDs, AddIns.xml UIDs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub special_applied: BTreeMap<String, Vec<String>>,
+    /// INI keys mods edited, with who set what (C# install-log INI edits + `IniEdits.xml`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ini_edits: Vec<crate::ini::Edit>,
     /// Unix seconds of the last Nexus update check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nexus_checked: Option<u64>,
@@ -1014,6 +1017,24 @@ impl Manager {
         Ok(Some(dest))
     }
 
+    /// Record mod `id` setting `key` in `section` of INI `file` (C# `IniInstaller.EditIni`, for
+    /// script installers). Deploy applies it while the mod is active and puts back the previous
+    /// editor's value, else the original, once it isn't (or is removed).
+    pub fn edit_ini(&mut self, id: &str, file: &Path, section: &str, key: &str, value: &str) {
+        crate::ini::record(&mut self.state.ini_edits, id, file, section, key, value);
+    }
+
+    /// The game INI (`None`) or another settings file by C# key (`FOPrefsIniPath`), inside the
+    /// Wine/Proton prefix when the game keeps its settings there.
+    pub fn settings_file(&self, key: Option<&str>) -> Option<PathBuf> {
+        let g = self.game.gamebryo.as_ref()?;
+        let t = match key {
+            None => g.ini_file_path.as_ref()?,
+            Some(k) => g.additional_settings_files.get(k)?,
+        };
+        Some(self.game.settings_path(t, &self.game_path))
+    }
+
     /// A question to ask before removing `id` (State of Decay / X Rebirth save-recorded mods).
     pub fn removal_warning(&self, id: &str) -> Option<String> {
         crate::special::removal_warning(self.state.mods.iter().find(|m| m.id == id)?)
@@ -1302,6 +1323,10 @@ impl Manager {
             &mut applied,
         );
         self.state.special_applied = applied;
+        let mods = &self.state.mods;
+        crate::ini::sync_edits(&mut self.state.ini_edits, |id| {
+            mods.iter().find(|m| m.id == id).map(|m| m.active)
+        });
         self.save()?;
         match fs::remove_file(self.journal_path()) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::Io {
@@ -1895,6 +1920,7 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ini;
     use std::io::Write;
     use std::sync::Arc;
 
@@ -1986,6 +2012,75 @@ mod tests {
 
         m.remove("Doc").unwrap();
         assert!(!mods.join("ReadMe/Doc").exists());
+    }
+
+    #[test]
+    fn ini_edits_stack_and_restore() {
+        let t = tempfile::tempdir().unwrap();
+        let lib = t.path().join("steamapps");
+        let game_path = lib.join("common/Fallout 4");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        let mut game = crate::game::find("Fallout4").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        let appid = game
+            .discovery
+            .stores
+            .iter()
+            .find(|s| s.store == "Steam")
+            .and_then(|s| s.id.clone())
+            .unwrap();
+        let user = lib.join(format!("compatdata/{appid}/pfx/drive_c/users/steamuser"));
+        fs::create_dir_all(&user).unwrap();
+        if cfg!(windows) {
+            game.user_dir = Some(user.clone()); // no Proton there
+        }
+        let mods = t.path().join("mods");
+        let mut m = Manager::open(game, game_path.clone(), mods.clone()).unwrap();
+        // The game INI resolves into the Proton prefix.
+        let ini = m.settings_file(None).unwrap();
+        assert_eq!(
+            ini,
+            user.join("Documents/My Games/Fallout4/Fallout4Custom.ini")
+        );
+        fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        fs::write(&ini, "[Display]\r\niSize W=1280\r\n").unwrap();
+        for id in ["A", "B"] {
+            let a = t.path().join(format!("{id}.zip"));
+            zip(&a, &[(&format!("{id}.esp"), "p")]);
+            let s = m.stage(&a).unwrap();
+            m.install(s, None).unwrap();
+        }
+        let get = |s: &str, k: &str| ini::get(&ini, s, k);
+
+        m.edit_ini("A", &ini, "Display", "iSize W", "1920");
+        m.edit_ini("A", &ini, "General", "bNew", "1");
+        m.deploy().unwrap();
+        assert_eq!(get("Display", "iSize W").as_deref(), Some("1920"));
+        assert_eq!(get("General", "bNew").as_deref(), Some("1"));
+        // Last editor wins; disabling it falls back to the one below, enabling re-applies it.
+        m.edit_ini("B", &ini, "display", "ISIZE W", "2560");
+        m.deploy().unwrap();
+        assert_eq!(get("Display", "iSize W").as_deref(), Some("2560"));
+        m.set_active("B", false).unwrap();
+        assert_eq!(get("Display", "iSize W").as_deref(), Some("1920"));
+        m.set_active("B", true).unwrap();
+        assert_eq!(get("Display", "iSize W").as_deref(), Some("2560"));
+        // Recorded across restarts.
+        let mut m = Manager::open(m.game.clone(), game_path, mods).unwrap();
+        // Removing a mod that doesn't own the live value leaves it; keys only it added go.
+        m.remove("A").unwrap();
+        assert_eq!(get("Display", "iSize W").as_deref(), Some("2560"));
+        assert_eq!(get("General", "bNew"), None);
+        // Editing again replaces the mod's value (upgrade), no second entry.
+        m.edit_ini("B", &ini, "Display", "iSize W", "3000");
+        m.deploy().unwrap();
+        assert_eq!(get("Display", "iSize W").as_deref(), Some("3000"));
+        assert_eq!(m.state.ini_edits.len(), 1);
+        assert_eq!(m.state.ini_edits[0].by.len(), 1);
+        // Last editor gone: the original value is back and nothing is left recorded.
+        m.remove("B").unwrap();
+        assert_eq!(get("Display", "iSize W").as_deref(), Some("1280"));
+        assert!(m.state.ini_edits.is_empty());
     }
 
     #[test]
