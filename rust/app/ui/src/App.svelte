@@ -81,6 +81,13 @@
       wizard = null;
       if (sel) await runTask(`Installing ${cfg.name || 'mod'}`, api.fomodInstall(token, sel)).catch(() => {});
       else api.fomodCancel(token);
+    } else if (res?.token && res.script) {
+      const { token, script } = res;
+      const name = path.split(/[\\/]/).pop();
+      const msg = `${name} uses a C# script installer (${script}), which isn’t supported.\n\nInstall its files as they are? The script’s choices and checks are skipped, so you may need to move or remove files by hand.`;
+      if (await api.ask('Unsupported installer', msg).catch(() => false))
+        await runTask(`Installing ${name}`, api.fomodInstall(token, null)).catch(() => {});
+      else api.fomodCancel(token);
     }
     if (view.kind === 'game' && view.mode === mode) reload();
   }

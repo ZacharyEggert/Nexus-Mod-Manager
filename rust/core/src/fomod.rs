@@ -1,5 +1,5 @@
 //! FOMod XML installer (`fomod/ModuleConfig.xml`), port of `Script Types/XmlScript`.
-//! C# scripts (`fomod/script.cs`) are intentionally unsupported.
+//! C# scripts (`fomod/script.cs`) are intentionally unsupported: `locate_script` flags them for a plain install.
 
 use roxmltree::Node;
 use serde::Serialize;
@@ -403,25 +403,30 @@ impl ModuleConfig {
     }
 }
 
-/// Shallowest `<dir>/fomod/ModuleConfig.xml` (case-insensitive) under `root`; returns (base dir, config path).
-pub fn locate(root: &Path) -> Option<(PathBuf, PathBuf)> {
+/// Shallowest `<dir>/fomod/<name>` (case-insensitive) under `root`.
+fn find(root: &Path, name: &str) -> Option<PathBuf> {
     walkdir::WalkDir::new(root)
         .sort_by_key(|e| e.depth())
         .into_iter()
         .filter_map(Result::ok)
         .find(|e| {
-            e.file_name().eq_ignore_ascii_case("moduleconfig.xml")
+            e.file_name().eq_ignore_ascii_case(name)
                 && e.path()
                     .parent()
                     .and_then(|p| p.file_name())
                     .is_some_and(|n| n.eq_ignore_ascii_case("fomod"))
         })
-        .map(|e| {
-            (
-                e.path().parent().unwrap().parent().unwrap().to_path_buf(),
-                e.into_path(),
-            )
-        })
+        .map(|e| e.into_path())
+}
+
+/// Shallowest `<dir>/fomod/ModuleConfig.xml` (case-insensitive) under `root`; returns (base dir, config path).
+pub fn locate(root: &Path) -> Option<(PathBuf, PathBuf)> {
+    find(root, "moduleconfig.xml").map(|p| (p.parent().unwrap().parent().unwrap().to_path_buf(), p))
+}
+
+/// Shallowest `fomod/script.cs` (C# script installer, unsupported) under `root`.
+pub fn locate_script(root: &Path) -> Option<PathBuf> {
+    find(root, "script.cs")
 }
 
 #[cfg(test)]

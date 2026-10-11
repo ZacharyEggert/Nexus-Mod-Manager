@@ -191,6 +191,9 @@ pub struct Staged {
     pub dir: PathBuf,
     /// `Some((base, config))` when the archive ships a FOMod installer.
     pub fomod: Option<(PathBuf, ModuleConfig)>,
+    /// Archive path of an unsupported C# script installer (`fomod/script.cs`) when there is no
+    /// `ModuleConfig.xml`; `install` then copies the files as they are.
+    pub script: Option<String>,
     /// Nexus origin to record on the installed mod.
     pub nexus: Option<crate::nexus::updates::NexusMeta>,
 }
@@ -642,6 +645,11 @@ impl Manager {
         });
         match fomod {
             Ok(fomod) => Ok(Staged {
+                script: fomod
+                    .is_none()
+                    .then(|| fomod::locate_script(&dir))
+                    .flatten()
+                    .map(|p| rel(&p, &dir)),
                 id,
                 archive: archive.to_path_buf(),
                 dir,
@@ -1825,6 +1833,48 @@ mod tests {
             z.write_all(body.as_bytes()).unwrap();
         }
         z.finish().unwrap();
+    }
+
+    #[test]
+    fn csharp_script_installer_flagged_plain_install() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        fs::create_dir_all(game_path.join("Data")).unwrap();
+        let mut game = crate::game::find("Fallout4").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mut m = Manager::open(game, game_path.clone(), t.path().join("mods")).unwrap();
+
+        let a = t.path().join("Scripted.zip");
+        zip(
+            &a,
+            &[
+                ("Scripted/fomod/Script.cs", "class Script {}"),
+                ("Scripted/fomod/info.xml", "<fomod/>"),
+                ("Scripted/S.esp", "p"),
+            ],
+        );
+        let s = m.stage(&a).unwrap();
+        assert!(s.fomod.is_none());
+        assert_eq!(s.script.as_deref(), Some("Scripted/fomod/Script.cs"));
+        m.install(s, None).unwrap();
+        assert!(game_path.join("Data/S.esp").exists());
+        assert!(!game_path.join("Data/fomod").exists());
+
+        // An XML config wins: the FOMod wizard runs, nothing is flagged.
+        let b = t.path().join("Both.zip");
+        zip(
+            &b,
+            &[
+                ("fomod/script.cs", "class Script {}"),
+                (
+                    "fomod/ModuleConfig.xml",
+                    "<config><moduleName>B</moduleName></config>",
+                ),
+            ],
+        );
+        let s = m.stage(&b).unwrap();
+        assert!(s.fomod.is_some() && s.script.is_none());
     }
 
     #[test]

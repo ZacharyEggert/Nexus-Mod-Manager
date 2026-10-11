@@ -243,6 +243,8 @@ export interface StageResult {
   /** Set when the archive is a FOMod: pass to the fomod_* commands. */
   token: string | null;
   fomod: ModuleConfig | null;
+  /** Archive path of an unsupported C# script installer: offer a plain install. */
+  script: string | null;
 }
 
 export type Op =
@@ -346,7 +348,8 @@ const call = <T>(cmd: string, args: Record<string, unknown>): TaskCall<T> => ({ 
 export const stage = (mode: string, archive: string, download: string | null = null) =>
   call<StageResult>('stage', { mode, archive, download });
 export const nexusCheck = (mode: string) => call<CheckReport>('nexus_check', { mode });
-export const fomodInstall = (token: string, sel: Selection) => call<void>('fomod_install', { token, sel });
+/** `sel` null: plain install of a staged C# script mod. */
+export const fomodInstall = (token: string, sel: Selection | null) => call<void>('fomod_install', { token, sel });
 export const apply = (mode: string, op: Op) => call<void>('apply', { mode, op });
 export const lootPreview = (mode: string) => call<LootPreview>('loot_preview', { mode });
 export const repair = (mode: string) => call<RepairReport>('repair', { mode });

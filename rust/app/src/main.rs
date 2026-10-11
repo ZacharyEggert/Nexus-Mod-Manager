@@ -937,9 +937,12 @@ async fn pick_folder(app: AppHandle) -> Option<String> {
 struct StageResult {
     token: Option<String>,
     fomod: Option<ModuleConfig>,
+    /// Unsupported C# script installer: the UI offers a plain install (`fomod_install` without `sel`).
+    script: Option<String>,
 }
 
-/// Task: extract an archive; plain mods install right away, FOMods return their config for the wizard.
+/// Task: extract an archive; plain mods install right away, FOMods return their config for the
+/// wizard, C# script installers their script path.
 #[tauri::command]
 fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: Option<String>) {
     let what = format!("install {}", archive.display());
@@ -950,27 +953,26 @@ fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: O
         staged.nexus = download
             .and_then(|id| downloads_of(app).ok()?.get(&id))
             .map(|d| download_meta(app, &d));
-        match staged.fomod.clone() {
-            None => {
-                m.transact(|m| m.install(staged, None))?;
-                Ok(StageResult {
-                    token: None,
-                    fomod: None,
-                })
-            }
-            Some((_, cfg)) => {
-                let token = staged.id.clone();
-                app.state::<App>()
-                    .staged
-                    .lock()
-                    .unwrap()
-                    .insert(token.clone(), (mode, staged));
-                Ok(StageResult {
-                    token: Some(token),
-                    fomod: Some(cfg),
-                })
-            }
+        let (fomod, script) = (staged.fomod.clone().map(|f| f.1), staged.script.clone());
+        if fomod.is_none() && script.is_none() {
+            m.transact(|m| m.install(staged, None))?;
+            return Ok(StageResult {
+                token: None,
+                fomod,
+                script,
+            });
         }
+        let token = staged.id.clone();
+        app.state::<App>()
+            .staged
+            .lock()
+            .unwrap()
+            .insert(token.clone(), (mode, staged));
+        Ok(StageResult {
+            token: Some(token),
+            fomod,
+            script,
+        })
     });
 }
 
@@ -1010,14 +1012,15 @@ async fn fomod_image(st: State<'_, App>, token: String, path: String) -> R<tauri
     ))
 }
 
-/// Task: install a staged FOMod with the wizard's selection.
+/// Task: install a staged FOMod with the wizard's selection; no selection = plain install of a
+/// staged C# script mod.
 #[tauri::command]
 fn fomod_install(
     app: AppHandle,
     st: State<'_, App>,
     id: String,
     token: String,
-    sel: Selection,
+    sel: Option<Selection>,
 ) -> R<()> {
     let (mode, s) = staged(&st, &token)?;
     let what = format!("install FOMod {}", s.archive.display());
@@ -1026,7 +1029,7 @@ fn fomod_install(
         m.task = task;
         // Staging dir is consumed whether install succeeds, fails or is cancelled.
         app.state::<App>().staged.lock().unwrap().remove(&token);
-        m.transact(|m| m.install(s, Some(&sel)))
+        m.transact(|m| m.install(s, sel.as_ref()))
     });
     Ok(())
 }
