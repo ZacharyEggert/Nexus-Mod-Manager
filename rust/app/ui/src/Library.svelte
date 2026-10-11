@@ -3,7 +3,23 @@
   import * as api from './lib/api';
   import { LINK_MODES, run } from './lib/ui.svelte';
 
-  let { mode, lib, op, repair, loose }: { mode: string; lib: api.Library; op: (label: string, o: api.Op) => void; repair: (adopt?: boolean) => void; loose: () => void } = $props();
+  let {
+    mode,
+    lib,
+    op,
+    repair,
+    loose,
+    reinstall,
+    upgrade,
+  }: {
+    mode: string;
+    lib: api.Library;
+    op: (label: string, o: api.Op) => void;
+    repair: (adopt?: boolean) => void;
+    loose: () => void;
+    reinstall: (m: api.ModEntry) => void;
+    upgrade: (m: api.ModEntry) => void;
+  } = $props();
 
   const order = $derived(Object.fromEntries(lib.mods.map((m, i) => [m.id, i])));
   const name = (id: string) => lib.mods[order[id]]?.name ?? id;
@@ -133,6 +149,8 @@
             <button title="Load earlier" aria-label="Move {m.name} up" disabled={i === 0} onclick={() => op('Reordering', { op: 'reorder', id: m.id, delta: -1 })}>▲</button>
             <button title="Load later (wins conflicts)" aria-label="Move {m.name} down" disabled={i === lib.mods.length - 1}
               onclick={() => op('Reordering', { op: 'reorder', id: m.id, delta: 1 })}>▼</button>
+            <button title="Reinstall from {m.archive}" aria-label="Reinstall {m.name}" onclick={() => reinstall(m)}>⟳</button>
+            <button title="Upgrade from another archive, keeping its place, profiles and plugin order" aria-label="Upgrade {m.name}" onclick={() => upgrade(m)}>⇪</button>
             <button title="Uninstall" aria-label="Uninstall {m.name}" onclick={() => op(`Removing ${m.name}`, { op: 'remove', id: m.id })}>✕</button>
           </td>
         </tr>

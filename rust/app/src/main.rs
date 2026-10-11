@@ -968,14 +968,26 @@ struct StageResult {
     script: Option<String>,
     /// `fomod/info.xml` metadata, for the wizard header.
     info: Option<Info>,
-    /// Choices this mod was last installed with, to replay.
+    /// Choices this mod (or the one it replaces) was last installed with, to replay.
     choices: Option<Selection>,
+    /// Installed mod this would replace: itself (reinstall) or an older version (upgrade).
+    replaces: Option<ModEntry>,
+    /// This archive's version (Nexus, else info.xml).
+    version: Option<String>,
 }
 
 /// Task: extract an archive; plain mods install right away, FOMods return their config for the
-/// wizard, C# script installers their script path.
+/// wizard, C# script installers their script path. One that would replace an installed mod
+/// (`replace`, the same archive, or an older version of it) waits for `fomod_install` too.
 #[tauri::command]
-fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: Option<String>) {
+fn stage(
+    app: AppHandle,
+    id: String,
+    mode: String,
+    archive: PathBuf,
+    download: Option<String>,
+    replace: Option<String>,
+) {
     let what = format!("install {}", archive.display());
     spawn(&app, id, mode.clone(), what, move |app, task| {
         let mut m = manager(app, &mode)?;
@@ -984,9 +996,18 @@ fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: O
         staged.nexus = download
             .and_then(|id| downloads_of(app).ok()?.get(&id))
             .map(|d| download_meta(app, &d));
+        let old = replace.or_else(|| staged.replaces.clone().or_else(|| m.older_version(&staged)));
+        if let Some(old) = &old {
+            m.set_replaces(&mut staged, old);
+        }
+        let replaces = old.and_then(|o| m.state.mods.iter().find(|x| x.id == o).cloned());
+        let version = (staged.nexus.as_ref().map(|n| &n.version))
+            .or(staged.info.as_ref().map(|i| &i.version))
+            .filter(|v| !v.is_empty())
+            .cloned();
         let (fomod, script) = (staged.fomod.clone().map(|f| f.1), staged.script.clone());
         let (info, choices) = (staged.info.clone(), staged.choices.clone());
-        if fomod.is_none() && script.is_none() {
+        if fomod.is_none() && script.is_none() && replaces.is_none() {
             m.transact(|m| m.install(staged, None))?;
             return Ok(StageResult {
                 token: None,
@@ -994,6 +1015,8 @@ fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: O
                 script,
                 info,
                 choices,
+                replaces,
+                version,
             });
         }
         let token = staged.id.clone();
@@ -1008,6 +1031,8 @@ fn stage(app: AppHandle, id: String, mode: String, archive: PathBuf, download: O
             script,
             info,
             choices,
+            replaces,
+            version,
         })
     });
 }
@@ -1049,7 +1074,7 @@ async fn fomod_image(st: State<'_, App>, token: String, path: String) -> R<tauri
 }
 
 /// Task: install a staged FOMod with the wizard's selection; no selection = plain install of a
-/// staged C# script mod.
+/// staged C# script mod or plain mod. `replace` false installs alongside the mod it would replace.
 #[tauri::command]
 fn fomod_install(
     app: AppHandle,
@@ -1057,8 +1082,12 @@ fn fomod_install(
     id: String,
     token: String,
     sel: Option<Selection>,
+    replace: bool,
 ) -> R<()> {
-    let (mode, s) = staged(&st, &token)?;
+    let (mode, mut s) = staged(&st, &token)?;
+    if !replace {
+        s.replaces = None;
+    }
     let what = format!("install FOMod {}", s.archive.display());
     spawn(&app, id, mode.clone(), what, move |app, task| {
         let mut m = manager(app, &mode)?;
@@ -1262,6 +1291,35 @@ async fn ask(app: AppHandle, title: String, message: String) -> bool {
         .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
         .buttons(tauri_plugin_dialog::MessageDialogButtons::YesNo)
         .blocking_show()
+}
+
+/// Three-way question: Some(true) = `yes`, Some(false) = `no`, None = Cancel.
+#[tauri::command]
+async fn ask3(
+    app: AppHandle,
+    title: String,
+    message: String,
+    yes: String,
+    no: String,
+) -> Option<bool> {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogResult as A};
+    let r = app
+        .dialog()
+        .message(message)
+        .title(title)
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            yes.clone(),
+            no.clone(),
+            "Cancel".into(),
+        ))
+        .blocking_show_with_result();
+    match r {
+        A::Yes => Some(true),
+        A::No => Some(false),
+        A::Custom(l) if l == yes => Some(true),
+        A::Custom(l) if l == no => Some(false),
+        _ => None,
+    }
 }
 
 /// Loose files in the game's Data folder (not base game, not ours); None when the game has no base list.
@@ -1484,6 +1542,7 @@ fn main() {
             launch_options,
             tool_folder,
             ask,
+            ask3,
             loose_files,
             plugins,
             plugins_set,

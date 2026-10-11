@@ -217,8 +217,10 @@ pub struct Staged {
     pub info: Option<fomod::Info>,
     /// The archive's `fomod/screenshot*`.
     pub screenshot: Option<PathBuf>,
-    /// Remembered wizard choices for this mod id, mapped onto this config.
+    /// Remembered wizard choices for this mod id (or the one it replaces), mapped onto this config.
     pub choices: Option<Selection>,
+    /// Installed mod this replaces in place: itself (reinstall) or an older version (upgrade).
+    pub replaces: Option<String>,
 }
 
 pub struct Manager {
@@ -770,9 +772,6 @@ impl Manager {
         if id.trim_matches('.').is_empty() {
             return Err("bad archive name".into());
         }
-        if self.state.mods.iter().any(|m| m.id == id) {
-            return Err(format!("'{id}' is already installed; remove it first").into());
-        }
         let dir = self.mods_dir.join(".staging").join(&id);
         let _ = fs::remove_dir_all(&dir);
         let fomod = crate::archive::extract(archive, &dir, &self.task).and_then(|()| {
@@ -802,12 +801,7 @@ impl Manager {
                     .filter(|s| s.starts_with(&*base))
                     .map(|s| rel(s, base));
             }
-            choices = self
-                .state
-                .fomod_choices
-                .get(&id)
-                .map(|c| cfg.selection(c))
-                .filter(|s| !s.is_empty());
+            choices = self.saved_choices(cfg, &id);
         }
         Ok(Staged {
             script: fomod
@@ -818,6 +812,12 @@ impl Manager {
             info: fomod::locate_info(&dir).and_then(|p| fomod::parse_info(&fs::read(p).ok()?)),
             screenshot,
             choices,
+            replaces: self
+                .state
+                .mods
+                .iter()
+                .any(|m| m.id == id)
+                .then(|| id.clone()),
             id,
             archive: archive.to_path_buf(),
             dir,
@@ -826,8 +826,71 @@ impl Manager {
         })
     }
 
-    /// Install a staged archive. `sel` is required when the archive is a FOMod.
+    fn saved_choices(&self, cfg: &ModuleConfig, id: &str) -> Option<Selection> {
+        let c = cfg.selection(self.state.fomod_choices.get(id)?);
+        (!c.is_empty()).then_some(c)
+    }
+
+    /// An installed older version of `s` to offer upgrading (C# `ModMatcher.FindAlternateVersion`):
+    /// same Nexus mod, both versions known and different, and the same file by id, update chain
+    /// or name.
+    // ponytail: first match; C# prefers the largest archive when several match.
+    pub fn older_version(&self, s: &Staged) -> Option<String> {
+        let n = s.nexus.as_ref()?;
+        let known = |v: &str| !v.trim().is_empty();
+        let hit = |o: &crate::nexus::updates::NexusMeta| {
+            o.domain == n.domain
+                && o.mod_id == n.mod_id
+                && known(&o.version)
+                && known(&n.version)
+                && !o.version.trim().eq_ignore_ascii_case(n.version.trim())
+                && (o.file_id == n.file_id
+                    || o.update.as_ref().is_some_and(|u| u.file_id == n.file_id)
+                    || o.file_name.eq_ignore_ascii_case(&n.file_name))
+        };
+        let m = self
+            .state
+            .mods
+            .iter()
+            .find(|m| m.id != s.id && m.nexus.as_ref().is_some_and(hit))?;
+        Some(m.id.clone())
+    }
+
+    /// Make `s` replace installed mod `old` in place (C# `ModUpgrader`), offering the FOMod
+    /// choices `old` was installed with.
+    pub fn set_replaces(&self, s: &mut Staged, old: &str) {
+        if let Some(c) = s
+            .fomod
+            .as_ref()
+            .and_then(|(_, cfg)| self.saved_choices(cfg, old))
+        {
+            s.choices = Some(c);
+        }
+        s.replaces = Some(old.into());
+    }
+
+    /// Install a staged archive. `sel` is required when the archive is a FOMod. With `replaces`,
+    /// the new files take the old mod's place: its load-order slot, enabled state and profiles;
+    /// paths both versions deploy keep their plugin position and state, files only the old one
+    /// had are removed (C# `ModFileUpgradeInstaller`).
     pub fn install(&mut self, staged: Staged, sel: Option<&Selection>) -> R<()> {
+        let slot = match &staged.replaces {
+            Some(r) => Some(
+                self.state
+                    .mods
+                    .iter()
+                    .position(|m| &m.id == r)
+                    .ok_or_else(|| format!("'{r}' is not installed"))?,
+            ),
+            None => None,
+        };
+        if staged.replaces.as_ref() != Some(&staged.id)
+            && self.state.mods.iter().any(|m| m.id == staged.id)
+        {
+            return Err(format!("'{}' is already installed; remove it first", staged.id).into());
+        }
+        let prev = slot.map(|i| self.state.mods[i].clone());
+        let same = prev.as_ref().is_some_and(|p| p.id == staged.id);
         // C# names the mod from info.xml.
         let name = match (&staged.info, &staged.fomod, sel) {
             (Some(i), _, _) if !i.name.is_empty() => i.name.clone(),
@@ -947,6 +1010,9 @@ impl Manager {
         let (mut files, mut root_files) = (vec![], vec![]);
         let n = map.len() as u64;
         self.mark_pending(&staged.id)?;
+        if let Some(p) = prev.as_ref().filter(|_| !same) {
+            self.mark_pending(&p.id)?;
+        }
         let copied = map
             .into_values()
             .enumerate()
@@ -985,21 +1051,61 @@ impl Manager {
             let choices = cfg.choices(sel);
             self.state.fomod_choices.insert(staged.id.clone(), choices);
         }
-        self.state.mods.push(ModEntry {
+        let entry = ModEntry {
             id: staged.id,
             name,
             archive: staged.archive.to_string_lossy().into_owned(),
             files,
             root_files,
-            game_root: game_root || profile_root,
-            active: true,
-            nexus: staged.nexus,
+            game_root: match &prev {
+                Some(p) if !p.root_files.is_empty() => p.game_root,
+                _ => game_root || profile_root,
+            },
+            active: prev.as_ref().is_none_or(|p| p.active),
+            nexus: staged
+                .nexus
+                .or_else(|| prev.as_ref().filter(|_| same)?.nexus.clone()),
             special,
             readmes,
             info: staged.info,
             screenshot,
-        });
-        self.deploy()?;
+        };
+        let (Some(i), Some(prev)) = (slot, prev) else {
+            self.state.mods.push(entry);
+            self.deploy()?;
+            return self.resolve_pending();
+        };
+        for ids in self.state.profiles.values_mut() {
+            ids.iter_mut()
+                .filter(|id| **id == prev.id)
+                .for_each(|id| *id = entry.id.clone());
+        }
+        self.state.mods[i] = entry;
+        // A reinstall rewrote the stored files under the same paths: relink them (copies are stale).
+        self.deploy_with(same.then_some(&prev.id[..]))?;
+        if same {
+            let keep: HashSet<String> = self.state.mods[i]
+                .deployable(true)
+                .map(|(f, r)| key(f, r))
+                .collect();
+            for (f, r) in prev
+                .deployable(true)
+                .filter(|(f, r)| !keep.contains(&key(f, *r)))
+            {
+                let store = match r {
+                    true => self.mods_dir.join("GameRootInstall").join(&prev.id),
+                    false => self.virtual_dir(&prev.id),
+                };
+                let _ = fs::remove_file(store.join(f));
+                prune(store.join(f).parent().unwrap(), &store);
+            }
+        }
+        // C# `IniUpgradeInstaller.FinalizeInstall` undoes the old version's INI edits the new one
+        // doesn't make again; installers make none (script installers aren't supported).
+        for e in &mut self.state.ini_edits {
+            e.by.retain(|(id, _)| *id != prev.id);
+        }
+        self.finish(&HashSet::new())?;
         self.resolve_pending()
     }
 
@@ -1008,6 +1114,7 @@ impl Manager {
     /// delete files of mods `op` was installing. Still returns `Err(Cancelled)`.
     pub fn transact(&mut self, op: impl FnOnce(&mut Self) -> R<()>) -> R<()> {
         let (mods, link_mode) = (self.state.mods.clone(), self.state.link_mode);
+        let profiles = self.state.profiles.clone();
         let result = op(self);
         if !matches!(result, Err(Error::Cancelled)) {
             return result;
@@ -1018,6 +1125,7 @@ impl Manager {
             self.state.deployed_mode = self.state.link_mode;
         }
         self.state.mods = mods;
+        self.state.profiles = profiles;
         self.state.link_mode = link_mode;
         let progress = self.task.progress.clone();
         let task = std::mem::replace(
@@ -1352,13 +1460,24 @@ impl Manager {
     }
 
     pub fn deploy(&mut self) -> R<()> {
+        self.deploy_with(None)
+    }
+
+    /// `deploy`, also relinking every path mod `refresh` deploys.
+    fn deploy_with(&mut self, refresh: Option<&str>) -> R<()> {
         let desired: BTreeMap<String, Deployed> = self.wanted().into_iter().collect();
         let deployed = &self.state.deployed;
         let relink = self.state.link_mode != self.state.deployed_mode;
         let journal: Journal = deployed
             .keys()
             .chain(desired.keys())
-            .filter(|k| relink || deployed.get(*k) != desired.get(*k))
+            .filter(|k| {
+                relink
+                    || deployed.get(*k) != desired.get(*k)
+                    || desired
+                        .get(*k)
+                        .is_some_and(|d| Some(&d.mod_id[..]) == refresh)
+            })
             .map(|k| {
                 (
                     k.clone(),
@@ -2197,6 +2316,224 @@ mod tests {
 
         m.remove("Doc").unwrap();
         assert!(!mods.join("ReadMe/Doc").exists());
+    }
+
+    fn nexus_meta(
+        file_id: u64,
+        file_name: &str,
+        version: &str,
+    ) -> crate::nexus::updates::NexusMeta {
+        crate::nexus::updates::NexusMeta {
+            domain: "skyrimspecialedition".into(),
+            mod_id: 7,
+            file_id,
+            mod_name: "Sky".into(),
+            file_name: file_name.into(),
+            version: version.into(),
+            author: String::new(),
+            category_id: None,
+            update: None,
+            checked: None,
+        }
+    }
+
+    #[test]
+    fn upgrade_keeps_order_plugins_profiles() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(data.join("textures")).unwrap();
+        fs::write(data.join("textures/sky.dds"), "vanilla").unwrap();
+        let txt = t.path().join("plugins.txt");
+        let mut game = crate::game::find("SkyrimSE").unwrap();
+        let policy = game.plugin.as_mut().unwrap().policy.as_mut().unwrap();
+        policy.plugins_file_path = Some(txt.to_string_lossy().into());
+        let mods = t.path().join("mods");
+        let mut m = Manager::open(game, game_path, mods.clone()).unwrap();
+        let add = |m: &mut Manager, name: &str, files: &[(&str, &str)]| {
+            let a = t.path().join(format!("{name}.zip"));
+            zip(&a, files);
+            m.stage(&a).unwrap()
+        };
+        let mut s = add(
+            &mut m,
+            "Sky-1.0",
+            &[("A.esp", ""), ("textures/sky.dds", "A1"), ("old.txt", "o")],
+        );
+        s.nexus = Some(nexus_meta(100, "Main", "1.0"));
+        m.install(s, None).unwrap();
+        let s = add(&mut m, "C", &[("C.esp", ""), ("textures/sky.dds", "C")]);
+        m.install(s, None).unwrap();
+        // The user moved A.esp after C.esp and switched it off.
+        fs::write(&txt, "*C.esp\r\nA.esp\r\n").unwrap();
+        m.save_profile("p").unwrap();
+        let ini = t.path().join("x.ini");
+        fs::write(&ini, "[S]\nk=orig\n").unwrap();
+        m.edit_ini("Sky-1.0", &ini, "S", "k", "mod");
+        m.deploy().unwrap();
+        assert_eq!(ini::get(&ini, "S", "k").as_deref(), Some("mod"));
+
+        // Only the same Nexus file (by id, update chain or name) in another version matches.
+        let mut s = add(
+            &mut m,
+            "Sky-2.0",
+            &[("A.esp", ""), ("textures/sky.dds", "A2"), ("new.txt", "n")],
+        );
+        for (meta, hit) in [
+            (nexus_meta(101, "Optional", "2.0"), false),
+            (nexus_meta(100, "Main", "1.0"), false),
+            (nexus_meta(101, "main", "2.0"), true),
+        ] {
+            s.nexus = Some(meta);
+            assert_eq!(m.older_version(&s).is_some(), hit);
+        }
+        assert_eq!(m.older_version(&s).as_deref(), Some("Sky-1.0"));
+        m.set_replaces(&mut s, "Sky-1.0");
+
+        // Cancelled mid-deploy: the old version is back, the new one's files are gone.
+        let task = Task::default();
+        let flag = task.cancel.clone();
+        m.task = Task {
+            progress: Arc::new(move |l, _, _| {
+                if l == "Deploying" {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed)
+                }
+            }),
+            ..task
+        };
+        let r = m.transact(|m| m.install(s.clone(), None));
+        assert!(matches!(r, Err(Error::Cancelled)));
+        m.task = Task::default();
+        let ids = |m: &Manager| {
+            m.state
+                .mods
+                .iter()
+                .map(|x| x.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&m), ["Sky-1.0", "C"]);
+        assert_eq!(m.state.profiles["p"], ["Sky-1.0", "C"]);
+        assert!(data.join("old.txt").exists() && !mods.join("VirtualInstall/Sky-2.0").exists());
+        // ponytail: a rolled-back deploy re-adds the plugins it unlinked as new (any cancelled op).
+        fs::write(&txt, "*C.esp\r\nA.esp\r\n").unwrap();
+
+        let s = add(
+            &mut m,
+            "Sky-2.0",
+            &[("A.esp", ""), ("textures/sky.dds", "A2"), ("new.txt", "n")],
+        );
+        let mut s = Staged {
+            nexus: Some(nexus_meta(101, "Main", "2.0")),
+            ..s
+        };
+        m.set_replaces(&mut s, "Sky-1.0");
+        m.install(s, None).unwrap();
+        // Same slot, same plugin position and state, same profiles; files it dropped are gone.
+        assert_eq!(ids(&m), ["Sky-2.0", "C"]);
+        assert_eq!(m.state.mods[0].nexus.as_ref().unwrap().version, "2.0");
+        let header =
+            "# This file is used by the game to keep track of your downloaded content.\r\n";
+        assert_eq!(
+            fs::read_to_string(&txt).unwrap(),
+            format!("{header}*C.esp\r\nA.esp\r\n")
+        );
+        assert_eq!(m.state.profiles["p"], ["Sky-2.0", "C"]);
+        assert!(!data.join("old.txt").exists());
+        assert_eq!(fs::read_to_string(data.join("new.txt")).unwrap(), "n");
+        assert!(!mods.join("VirtualInstall/Sky-1.0").exists());
+        // The old version's INI edit is undone (the new one doesn't make it).
+        assert_eq!(ini::get(&ini, "S", "k").as_deref(), Some("orig"));
+        assert!(m.state.ini_edits.is_empty());
+        // Conflicts: C still wins; without it the new version shows; without both, vanilla.
+        let sky = || fs::read_to_string(data.join("textures/sky.dds")).unwrap();
+        assert_eq!(sky(), "C");
+        m.remove("C").unwrap();
+        assert_eq!(sky(), "A2");
+        m.set_active("Sky-2.0", false).unwrap();
+        assert_eq!(sky(), "vanilla");
+    }
+
+    #[test]
+    fn reinstall_and_upgrade_replay_fomod_choices() {
+        let t = tempfile::tempdir().unwrap();
+        let game_path = t.path().join("game");
+        let data = game_path.join("Data");
+        fs::create_dir_all(&data).unwrap();
+        let mut game = crate::game::find("Fallout4").unwrap();
+        game.plugin.as_mut().unwrap().policy = None;
+        game.gamebryo = None;
+        let mods = t.path().join("mods");
+        let mut m = Manager::open(game, game_path, mods.clone()).unwrap();
+        m.set_link_mode(LinkMode::Copy).unwrap();
+        let cfg = r#"<config><moduleName>Opt</moduleName><installSteps><installStep name="S">
+  <optionalFileGroups><group name="G" type="SelectExactlyOne"><plugins order="Explicit">
+    <plugin name="A"><description/><files><file source="a.txt"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+    <plugin name="B"><description/><files><file source="b.txt"/></files><typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+  </plugins></group></optionalFileGroups></installStep></installSteps></config>"#;
+        let archive = |name: &str, v: &str| {
+            let p = t.path().join(name);
+            let info = format!("<fomod><Name>Opt</Name><Version>{v}</Version></fomod>");
+            zip(
+                &p,
+                &[
+                    ("fomod/ModuleConfig.xml", cfg),
+                    ("fomod/info.xml", &info),
+                    ("fomod/screenshot.png", v),
+                    ("readme.txt", v),
+                    ("a.txt", &format!("a{v}")),
+                    ("b.txt", &format!("b{v}")),
+                ],
+            );
+            p
+        };
+        let a = archive("Opt.zip", "1");
+        let s = m.stage(&a).unwrap();
+        assert_eq!(s.replaces, None);
+        m.install(s, Some(&vec![(0, 0, 1)])).unwrap();
+
+        // Same archive again: a reinstall of the installed mod, offering its choices.
+        let a = archive("Opt.zip", "1.1");
+        let s = m.stage(&a).unwrap();
+        assert_eq!(s.replaces.as_deref(), Some("Opt"));
+        assert_eq!(s.choices, Some(vec![(0, 0, 1)]));
+        let err = m.install(
+            Staged {
+                replaces: None,
+                ..s.clone()
+            },
+            Some(&vec![(0, 0, 0)]),
+        );
+        assert!(err.unwrap_err().to_string().contains("already installed"));
+        let s = m.stage(&a).unwrap();
+        m.install(s, Some(&vec![(0, 0, 0)])).unwrap();
+        assert_eq!(m.state.mods.len(), 1);
+        assert_eq!(m.state.mods[0].files, ["a.txt"]);
+        // Copied (not linked) files are refreshed too; the dropped option's file goes.
+        assert_eq!(fs::read_to_string(data.join("a.txt")).unwrap(), "a1.1");
+        assert!(!data.join("b.txt").exists() && !mods.join("VirtualInstall/Opt/b.txt").exists());
+        assert_eq!(m.state.fomod_choices["Opt"][0].plugin, "A");
+
+        // Upgrade to a differently named archive: the old mod's choices are replayed.
+        let b = archive("Opt v2.zip", "2");
+        let mut s = m.stage(&b).unwrap();
+        assert_eq!((s.replaces.as_deref(), s.choices.as_ref()), (None, None));
+        m.set_replaces(&mut s, "Opt");
+        assert_eq!(s.choices, Some(vec![(0, 0, 0)]));
+        let sel = s.choices.clone();
+        m.install(s, sel.as_ref()).unwrap();
+        let e = &m.state.mods[0];
+        assert_eq!(
+            (&e.id[..], &e.info.as_ref().unwrap().version[..]),
+            ("Opt v2", "2")
+        );
+        assert_eq!(fs::read_to_string(data.join("a.txt")).unwrap(), "a2");
+        let readme = m.readme_path("Opt v2", "readme.txt").unwrap();
+        assert_eq!(fs::read_to_string(readme).unwrap(), "2");
+        assert_eq!(
+            fs::read_to_string(m.screenshot_path("Opt v2").unwrap()).unwrap(),
+            "2"
+        );
+        assert!(!mods.join("ReadMe/Opt").exists() && !mods.join("Screenshot/Opt").exists());
     }
 
     #[test]

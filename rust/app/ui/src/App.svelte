@@ -71,25 +71,52 @@
     reload();
   }
 
-  async function install(path: string, download: string | null = null) {
+  /** `replace`: id of the installed mod this replaces (Reinstall / Upgrade…); otherwise a matching one is asked about. */
+  async function install(path: string, download: string | null = null, replace: string | null = null) {
     if (view.kind !== 'game' || !cur?.game_path) return status('Pick and set up a game first', true);
     const mode = view.mode;
-    const res = await runTask(`Installing ${path.split(/[\\/]/).pop()}`, api.stage(mode, path, download)).catch(() => null);
-    if (res?.token && res.fomod) {
-      const { token, fomod: cfg } = res;
+    const name = path.split(/[\\/]/).pop();
+    const res = await runTask(`Installing ${name}`, api.stage(mode, path, download, replace)).catch(() => null);
+    const token = res?.token;
+    let upgrade = true;
+    const old = res?.replaces;
+    if (token && old && !replace) {
+      const ok =
+        old.id === token
+          ? (await api.ask('Reinstall mod', `${old.name} is already installed from ${name}. Reinstall it?`).catch(() => false)) || null
+          : await api
+              .ask3(
+                'Upgrade mod',
+                `A different version of ${old.name} is installed (${old.nexus?.version || old.info?.version || 'unknown'}; this is ${res.version || 'unknown'}).\n\nUpgrade it? The new version takes its place in the load order and profiles, keeping its plugins’ order and state.`,
+                'Upgrade',
+                'Install separately',
+              )
+              .catch(() => null);
+      if (ok === null) {
+        api.fomodCancel(token);
+        return;
+      }
+      upgrade = ok;
+    }
+    const label = `${old && upgrade ? (old.id === token ? 'Reinstalling' : 'Upgrading') : 'Installing'} ${name}`;
+    if (token && res.fomod) {
+      const cfg = res.fomod;
       const sel = await new Promise<api.Selection | null>((finish) => (wizard = { token, cfg, info: res.info, saved: res.choices, finish }));
       wizard = null;
-      if (sel) await runTask(`Installing ${cfg.name || 'mod'}`, api.fomodInstall(token, sel)).catch(() => {});
+      if (sel) await runTask(label, api.fomodInstall(token, sel, upgrade)).catch(() => {});
       else api.fomodCancel(token);
-    } else if (res?.token && res.script) {
-      const { token, script } = res;
-      const name = path.split(/[\\/]/).pop();
-      const msg = `${name} uses a C# script installer (${script}), which isn’t supported.\n\nInstall its files as they are? The script’s choices and checks are skipped, so you may need to move or remove files by hand.`;
-      if (await api.ask('Unsupported installer', msg).catch(() => false))
-        await runTask(`Installing ${name}`, api.fomodInstall(token, null)).catch(() => {});
+    } else if (token && res.script) {
+      const msg = `${name} uses a C# script installer (${res.script}), which isn’t supported.\n\nInstall its files as they are? The script’s choices and checks are skipped, so you may need to move or remove files by hand.`;
+      if (await api.ask('Unsupported installer', msg).catch(() => false)) await runTask(label, api.fomodInstall(token, null, upgrade)).catch(() => {});
       else api.fomodCancel(token);
-    }
+    } else if (token) await runTask(label, api.fomodInstall(token, null, upgrade)).catch(() => {});
     if (view.kind === 'game' && view.mode === mode) reload();
+  }
+
+  /** Upgrade `m` from an archive the user picks. */
+  async function upgradeMod(m: api.ModEntry) {
+    const p = await api.pickArchive();
+    if (p) install(p, null, m.id);
   }
 
   async function pickAndInstall() {
@@ -253,7 +280,7 @@
         {#if lib.uses_plugins && tab === 'plugins'}
           <Plugins mode={view.mode} loot={lib.loot} />
         {:else}
-          <Library mode={view.mode} {lib} {op} {repair} loose={looseFiles} />
+          <Library mode={view.mode} {lib} {op} {repair} loose={looseFiles} reinstall={(m) => install(m.archive, null, m.id)} upgrade={upgradeMod} />
         {/if}
       {/if}
     {/if}

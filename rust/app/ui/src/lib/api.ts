@@ -256,14 +256,18 @@ export interface Eval {
 }
 
 export interface StageResult {
-  /** Set when the archive is a FOMod: pass to the fomod_* commands. */
+  /** Set when not installed yet (FOMod, script, or replacing a mod): pass to the fomod_* commands. */
   token: string | null;
   fomod: ModuleConfig | null;
   /** Archive path of an unsupported C# script installer: offer a plain install. */
   script: string | null;
   info: FomodInfo | null;
-  /** Choices this mod was last installed with: offer a replay. */
+  /** Choices this mod (or the one it replaces) was last installed with: offer a replay. */
   choices: Selection | null;
+  /** Installed mod this would replace: itself (reinstall, `id === token`) or an older version. */
+  replaces: ModEntry | null;
+  /** This archive's version, when known. */
+  version: string | null;
 }
 
 export type Op =
@@ -294,6 +298,8 @@ export const launchOptions = (mode: string) => invoke<LaunchOptions>('launch_opt
 /** Pick a supported tool's folder; false when cancelled. */
 export const toolFolder = (mode: string, id: string) => invoke<boolean>('tool_folder', { mode, id });
 export const ask = (title: string, message: string) => invoke<boolean>('ask', { title, message });
+/** true = `yes`, false = `no`, null = Cancel. */
+export const ask3 = (title: string, message: string, yes: string, no: string) => invoke<boolean | null>('ask3', { title, message, yes, no });
 /** null when the game has no base-file list. */
 export const looseFiles = (mode: string) => invoke<string[] | null>('loose_files', { mode });
 /** Asks the mod's uninstall warning (State of Decay / X Rebirth saves), if it has one; false = keep it. */
@@ -367,12 +373,14 @@ export interface TaskCall<T> {
 }
 const call = <T>(cmd: string, args: Record<string, unknown>): TaskCall<T> => ({ cmd, args });
 
-/** `download`: id of the finished download the archive came from (records its Nexus origin). */
-export const stage = (mode: string, archive: string, download: string | null = null) =>
-  call<StageResult>('stage', { mode, archive, download });
+/** `download`: id of the finished download the archive came from (records its Nexus origin).
+ * `replace`: id of the installed mod it replaces (upgrade / reinstall). */
+export const stage = (mode: string, archive: string, download: string | null = null, replace: string | null = null) =>
+  call<StageResult>('stage', { mode, archive, download, replace });
 export const nexusCheck = (mode: string) => call<CheckReport>('nexus_check', { mode });
-/** `sel` null: plain install of a staged C# script mod. */
-export const fomodInstall = (token: string, sel: Selection | null) => call<void>('fomod_install', { token, sel });
+/** `sel` null: plain install of a staged C# script mod or plain mod. `replace` false: install
+ * alongside the mod it would replace. */
+export const fomodInstall = (token: string, sel: Selection | null, replace = true) => call<void>('fomod_install', { token, sel, replace });
 export const apply = (mode: string, op: Op) => call<void>('apply', { mode, op });
 export const lootPreview = (mode: string) => call<LootPreview>('loot_preview', { mode });
 export const repair = (mode: string) => call<RepairReport>('repair', { mode });
